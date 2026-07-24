@@ -8,6 +8,8 @@ from crypto_oi_monitor.sources import (
     parse_bybit_open_interest,
     parse_gate_open_interest,
     parse_hyperliquid_open_interest,
+    parse_kucoin_open_interest,
+    parse_mexc_open_interest,
     parse_okx_open_interest,
 )
 
@@ -130,6 +132,72 @@ class VenueParserTests(unittest.TestCase):
             "ETH", "ETHUSDT", {"openInterest": "20"}, {"ETHUSDT": "3000"}
         )
         self.assertEqual(oi.oi_usd, 60_000)
+
+    def test_calculates_kucoin_usdt_linear_oi_and_maps_xbt_to_btc(self) -> None:
+        result = parse_kucoin_open_interest(
+            {
+                "data": [
+                    {
+                        "symbol": "XBTUSDTM",
+                        "baseCurrency": "XBT",
+                        "quoteCurrency": "USDT",
+                        "settleCurrency": "USDT",
+                        "status": "Open",
+                        "isInverse": False,
+                        "openInterest": "20",
+                        "multiplier": "0.001",
+                        "markPrice": "60000",
+                    },
+                    {
+                        "symbol": "BTCUSDCM",
+                        "baseCurrency": "XBT",
+                        "quoteCurrency": "USDC",
+                        "settleCurrency": "USDC",
+                        "status": "Open",
+                        "isInverse": False,
+                        "openInterest": "20",
+                        "multiplier": "0.001",
+                        "markPrice": "60000",
+                    },
+                ]
+            },
+            {"BTC"},
+        )
+
+        self.assertEqual(result[0].venue, "KuCoin")
+        self.assertEqual(result[0].canonical_symbol, "BTC")
+        self.assertEqual(result[0].oi_usd, 1_200)
+        self.assertEqual(len(result), 1)
+
+    def test_calculates_mexc_usdt_linear_oi_from_contract_size_and_fair_price(self) -> None:
+        result = parse_mexc_open_interest(
+            {
+                "data": [
+                    {
+                        "symbol": "ETH_USDT",
+                        "baseCoin": "ETH",
+                        "quoteCoin": "USDT",
+                        "settleCoin": "USDT",
+                        "contractSize": "0.1",
+                        "state": 0,
+                    },
+                    {
+                        "symbol": "ETH_USDT_OLD",
+                        "baseCoin": "ETH",
+                        "quoteCoin": "USDT",
+                        "settleCoin": "USDT",
+                        "contractSize": "0.1",
+                        "state": 3,
+                    },
+                ]
+            },
+            {"data": [{"symbol": "ETH_USDT", "holdVol": "5", "fairPrice": "3000"}]},
+            {"ETH"},
+        )
+
+        self.assertEqual(result[0].venue, "MEXC")
+        self.assertEqual(result[0].oi_usd, 1_500)
+        self.assertEqual(len(result), 1)
 
 
 if __name__ == "__main__":

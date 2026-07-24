@@ -26,6 +26,9 @@ BINANCE_OPEN_INTEREST_URL = "https://fapi.binance.com/fapi/v1/openInterest"
 
 OKX_OPEN_INTEREST_URL = "https://www.okx.com/api/v5/public/open-interest"
 BYBIT_TICKERS_URL = "https://api.bybit.com/v5/market/tickers"
+KUCOIN_CONTRACTS_URL = "https://api-futures.kucoin.com/api/v1/contracts/active"
+MEXC_CONTRACTS_URL = "https://api.mexc.com/api/v1/contract/detail"
+MEXC_TICKERS_URL = "https://api.mexc.com/api/v1/contract/ticker"
 BITGET_OPEN_INTEREST_URL = "https://api.bitget.com/api/v3/market/open-interest"
 BITGET_TICKERS_URL = "https://api.bitget.com/api/v2/mix/market/tickers"
 BITGET_CONTRACTS_URL = "https://api.bitget.com/api/v2/mix/market/contracts"
@@ -41,6 +44,8 @@ MAX_OI_WORKERS = 50
 
 def canonical_symbol(raw_symbol: str) -> str:
     symbol = raw_symbol.upper()
+    if symbol == "XBT":
+        return "BTC"
     for prefix in ("1000000", "100000", "10000", "1000"):
         if symbol.startswith(prefix) and len(symbol) > len(prefix):
             return symbol[len(prefix) :]
@@ -131,6 +136,67 @@ def parse_bybit_open_interest(
                 ContractOpenInterest("Bybit", symbol, float(item["openInterestValue"]), canonical)
             )
     return contracts
+
+
+def parse_kucoin_open_interest(
+    payload: dict[str, Any], selected_assets: set[str]
+) -> list[ContractOpenInterest]:
+    result: list[ContractOpenInterest] = []
+    for item in payload["data"]:
+        if (
+            item["quoteCurrency"] != "USDT"
+            or item["settleCurrency"] != "USDT"
+            or item["isInverse"]
+            or item["status"] != "Open"
+        ):
+            continue
+        canonical = canonical_symbol(item["baseCurrency"])
+        if canonical not in selected_assets:
+            continue
+        result.append(
+            ContractOpenInterest(
+                "KuCoin",
+                item["symbol"],
+                float(item["openInterest"])
+                * float(item["multiplier"])
+                * float(item["markPrice"]),
+                canonical,
+            )
+        )
+    return result
+
+
+def parse_mexc_open_interest(
+    contracts_payload: dict[str, Any],
+    tickers_payload: dict[str, Any],
+    selected_assets: set[str],
+) -> list[ContractOpenInterest]:
+    tickers = {item["symbol"]: item for item in tickers_payload["data"]}
+    result: list[ContractOpenInterest] = []
+    for contract in contracts_payload["data"]:
+        if (
+            contract["quoteCoin"] != "USDT"
+            or contract["settleCoin"] != "USDT"
+            or contract["state"] != 0
+        ):
+            continue
+        canonical = canonical_symbol(contract["baseCoin"])
+        if canonical not in selected_assets:
+            continue
+        ticker = tickers.get(contract["symbol"])
+        if ticker is None:
+            continue
+        result.append(
+            ContractOpenInterest(
+                "MEXC",
+                contract["symbol"],
+                float(ticker["holdVol"])
+                * float(contract["contractSize"])
+                * float(ticker["fairPrice"]),
+                canonical,
+            )
+        )
+    return result
 
 
 def parse_bitget_open_interest(
@@ -240,6 +306,22 @@ def fetch_bybit_open_interest(
 ) -> list[ContractOpenInterest]:
     return parse_bybit_open_interest(
         client.get_json(BYBIT_TICKERS_URL, {"category": "linear"}), selected_assets
+    )
+
+
+def fetch_kucoin_open_interest(
+    client: PublicHttpClient, selected_assets: set[str]
+) -> list[ContractOpenInterest]:
+    return parse_kucoin_open_interest(client.get_json(KUCOIN_CONTRACTS_URL), selected_assets)
+
+
+def fetch_mexc_open_interest(
+    client: PublicHttpClient, selected_assets: set[str]
+) -> list[ContractOpenInterest]:
+    return parse_mexc_open_interest(
+        client.get_json(MEXC_CONTRACTS_URL),
+        client.get_json(MEXC_TICKERS_URL),
+        selected_assets,
     )
 
 

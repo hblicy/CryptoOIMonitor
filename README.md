@@ -1,6 +1,6 @@
 # 合约 OI / 市值监控
 
-汇总 Binance、OKX、Bybit、Bitget、Gate、Hyperliquid、Aster 的永续合约 OI，并按 CoinGecko 市值计算 `OI / MC`。
+汇总 Binance、OKX、Bybit、Bitget、Gate、KuCoin、MEXC、Hyperliquid、Aster 的永续合约 OI，并按 CoinGecko 市值计算 `OI / MC`。
 
 - 币种池：仅 Binance USDⓈ 永续合约，且 24 小时美元成交额不少于 **1,000 万 USD**。
 - 黄色预警：`OI > MC`。

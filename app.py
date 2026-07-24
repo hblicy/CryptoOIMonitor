@@ -30,6 +30,8 @@ from crypto_oi_monitor.sources import (
     fetch_bybit_open_interest,
     fetch_gate_open_interest,
     fetch_hyperliquid_open_interest,
+    fetch_kucoin_open_interest,
+    fetch_mexc_open_interest,
     fetch_okx_open_interest,
 )
 from crypto_oi_monitor.storage import SnapshotStore
@@ -62,6 +64,12 @@ class MonitorApplication:
                     public_client, set(universe)
                 ),
                 "Gate": lambda universe: fetch_gate_open_interest(
+                    public_client, set(universe)
+                ),
+                "KuCoin": lambda universe: fetch_kucoin_open_interest(
+                    public_client, set(universe)
+                ),
+                "MEXC": lambda universe: fetch_mexc_open_interest(
                     public_client, set(universe)
                 ),
                 "Hyperliquid": lambda universe: fetch_hyperliquid_open_interest(

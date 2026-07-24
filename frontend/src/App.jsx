@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { formatRatio, formatShanghaiTime, formatUsd, riskLabel } from "./format";
 
-const VENUES = ["Binance", "OKX", "Bybit", "Bitget", "Gate", "Hyperliquid", "Aster"];
+const VENUES = ["Binance", "OKX", "Bybit", "Bitget", "Gate", "KuCoin", "MEXC", "Hyperliquid", "Aster"];
 
 function sourceStatus(source) {
   if (!source) return "未返回";
