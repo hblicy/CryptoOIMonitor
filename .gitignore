@@ -4,3 +4,6 @@ data/*.db
 frontend/node_modules/
 frontend/dist/
 artifacts/
+.env
+data/*.pid
+data/*.log

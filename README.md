@@ -25,6 +25,34 @@ python app.py --port 8766
 
 页面服务启动后立即刷新，之后默认每 120 秒刷新一次。Binance 和 Aster 需按交易对拉取 OI，首轮全量刷新通常需要约一分钟；页面会保留最近一次完整快照并显示其时间。
 
+## Ubuntu VPS 启停
+
+```bash
+# 首次部署
+cp .env.example .env
+nano .env                    # 填写 API Key 和 Webhook
+
+cd frontend
+npm ci && npm run build
+cd ..
+
+# 启动
+bash scripts/start.sh
+
+# 查看日志
+tail -f data/monitor.log
+
+# 停止
+bash scripts/stop.sh
+```
+
+可通过 `ENV_FILE` 环境变量指定其他配置文件：
+
+```bash
+ENV_FILE=/etc/crypto-oi-monitor.env bash scripts/start.sh
+```
+
+
 ## 企业微信告警
 
 只在完整快照中触发：
