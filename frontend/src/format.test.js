@@ -7,8 +7,10 @@ describe("dashboard formatting", () => {
     expect(formatUsd(1_250_000_000)).toBe("$1.25B");
   });
 
-  it("formats ratio and strict risk labels", () => {
+  it("labels elevated OI ratios as attention signals", () => {
     expect(formatRatio(2.5)).toBe("250.00%");
-    expect(riskLabel("high_risk")).toBe("高危（>200%）");
+    expect(riskLabel("high_risk")).toBe("埋伏候选（>200%）");
+    expect(riskLabel("warning")).toBe("重点关注（>100%）");
+    expect(riskLabel("normal")).toBe("常规");
   });
 });

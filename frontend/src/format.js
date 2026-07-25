@@ -20,9 +20,9 @@ export function formatRatio(value) {
 }
 
 export function riskLabel(status) {
-  if (status === "high_risk") return "高危（>200%）";
-  if (status === "warning") return "预警（>100%）";
-  return "正常";
+  if (status === "high_risk") return "埋伏候选（>200%）";
+  if (status === "warning") return "重点关注（>100%）";
+  return "常规";
 }
 
 export function formatShanghaiTime(value) {

@@ -97,12 +97,12 @@ class MonitorApplication:
             if self.notifier is None:
                 snapshot["notification"] = {
                     "status": "not_configured",
-                    "message": "WECOM_ROBOT_WEBHOOK_URL 未配置，企业微信提醒未启用。",
+                    "message": "WECOM_ROBOT_WEBHOOK_URL 未配置，企业微信关注提醒未启用。",
                 }
             elif not snapshot["complete"]:
                 snapshot["notification"] = {
                     "status": "suppressed",
-                    "message": "数据源不完整，本轮不会推送企业微信提醒。",
+                    "message": "数据源不完整，本轮不会推送企业微信关注提醒。",
                 }
             else:
                 try:

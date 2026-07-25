@@ -3,10 +3,10 @@
 汇总 Binance、OKX、Bybit、Bitget、Gate、KuCoin、MEXC、Hyperliquid、Aster 的永续合约 OI，并按 CoinGecko 市值计算 `OI / MC`。
 
 - 币种池：仅 Binance USDⓈ 永续合约，且 24 小时美元成交额不少于 **1,000 万 USD**。
-- 黄色预警：`OI > MC`。
-- 红色高危：`OI > 2 × MC`。
+- 黄色重点关注：`OI > MC`。
+- 红色埋伏候选：`OI > 2 × MC`。
 - 当任一交易所或 CoinGecko 本轮请求失败时，页面显示数据源错误并禁止企业微信阈值推送。
-- 数据库保存每轮快照和企业微信告警状态；不会复用旧快照冒充本轮数据。
+- 数据库保存每轮快照和企业微信推送状态；不会复用旧快照冒充本轮数据。
 
 ## 启动
 
@@ -17,7 +17,7 @@ npm run build
 
 cd ..
 $env:COINGECKO_API_KEY = "你的 CoinGecko Demo API Key" # 可选，生产环境建议配置
-$env:WECOM_ROBOT_WEBHOOK_URL = "你的企业微信机器人 Webhook" # 启用告警时必填
+$env:WECOM_ROBOT_WEBHOOK_URL = "你的企业微信机器人 Webhook" # 启用提醒时必填
 python app.py --port 8766
 ```
 
@@ -53,13 +53,13 @@ ENV_FILE=/etc/crypto-oi-monitor.env bash scripts/start.sh
 ```
 
 
-## 企业微信告警
+## 企业微信关注提醒
 
 只在完整快照中触发：
 
-- 首次进入 `OI > 2 × MC` 时推送高危消息。
-- 持续高危不重复推送。
-- 从高危回落时推送恢复消息。
+- 首次进入 `OI > 2 × MC` 时推送埋伏候选消息。
+- 持续处于埋伏候选不重复推送。
+- 从埋伏候选回落时推送退出提醒。
 
 机器人 Webhook 仅从 `WECOM_ROBOT_WEBHOOK_URL` 环境变量读取，绝不写入代码或提交到仓库。
 

@@ -60,7 +60,7 @@ function App() {
   }, []);
 
   const comparisons = summary?.comparisons ?? [];
-  const highRiskCount = comparisons.filter((item) => item.status === "high_risk").length;
+  const ambushCandidateCount = comparisons.filter((item) => item.status === "high_risk").length;
   const healthySources = Object.values(summary?.sources ?? {}).filter(
     (source) => source.status === "ok",
   ).length;
@@ -96,7 +96,7 @@ function App() {
 
       <section className="summary-strip" aria-label="监控概要">
         <Metric label="跟踪资产数量" value={summary?.selected_asset_count ?? 0} />
-        <Metric label="当前高风险预警" value={highRiskCount} tone={highRiskCount ? "amber" : "default"} />
+        <Metric label="当前埋伏候选" value={ambushCandidateCount} tone={ambushCandidateCount ? "amber" : "default"} />
         <Metric label="数据源健康状态" value={`${healthySources} / ${Object.keys(summary?.sources ?? {}).length}`} tone={summary?.complete ? "green" : "red"} />
         <Metric label="上次全量更新时间" value={formatShanghaiTime(summary?.captured_at)} wide />
       </section>
@@ -107,7 +107,7 @@ function App() {
           {VENUES.map((venue) => <Source key={venue} name={venue} source={summary?.sources?.[venue]} />)}
         </div>
         <span className={`snapshot-state ${summary?.complete ? "snapshot-ok" : "snapshot-error"}`}>
-          {summary?.complete ? "所有数据源完整" : "数据源不完整，已禁止预警推送"}
+          {summary?.complete ? "所有数据源完整" : "数据源不完整，已暂停关注提醒推送"}
         </span>
       </section>
 
@@ -120,25 +120,25 @@ function App() {
               <span aria-hidden="true">⌕</span>
             </label>
             <label className="select-control">
-              <span className="sr-only">风险状态</span>
+              <span className="sr-only">关注状态</span>
               <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-                <option value="all">全部风险状态</option>
-                <option value="high_risk">高危（&gt;200%）</option>
-                <option value="warning">预警（&gt;100%）</option>
-                <option value="normal">正常</option>
+                <option value="all">全部关注状态</option>
+                <option value="high_risk">埋伏候选（&gt;200%）</option>
+                <option value="warning">重点关注（&gt;100%）</option>
+                <option value="normal">常规</option>
               </select>
             </label>
             <label className="checkbox-control">
               <input type="checkbox" checked={alertsOnly} onChange={(event) => setAlertsOnly(event.target.checked)} />
-              仅看预警
+              仅看关注项
             </label>
           </div>
-          <p className="formula">指标说明：OI / 市值 = 聚合永续合约未平仓量（OI）÷ 代币市值（MC）。当比例 &gt; 100% 表示 OI 超过市值；&gt; 200% 为高危区域。</p>
+          <p className="formula">指标说明：OI / 市值 = 聚合永续合约未平仓量（OI）÷ 代币市值（MC）。当比例 &gt; 100% 为重点关注；&gt; 200% 为埋伏候选区。</p>
           <div className="table-scroll">
             <table>
               <thead>
                 <tr>
-                  <th>#</th><th>资产</th><th>市值（MC）</th><th>聚合 OI（USD）</th><th>OI / 市值</th><th>风险状态</th><th>7 交易所 OI 覆盖度</th><th>操作</th>
+                  <th>#</th><th>资产</th><th>市值（MC）</th><th>聚合 OI（USD）</th><th>OI / 市值</th><th>关注状态</th><th>9 交易所 OI 覆盖度</th><th>操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -164,7 +164,7 @@ function App() {
       </section>
 
       <footer className="system-note">
-        {summary?.notification?.message || (summary?.notification?.status === "ok" ? "企业微信告警状态正常。" : "企业微信状态待刷新。")}
+        {summary?.notification?.message || (summary?.notification?.status === "ok" ? "企业微信关注提醒状态正常。" : "企业微信状态待刷新。")}
         {summary?.unmapped_assets?.length ? ` CoinGecko 未映射：${summary.unmapped_assets.join("、")}` : ""}
       </footer>
     </main>

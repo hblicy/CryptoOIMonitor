@@ -1,6 +1,6 @@
 import unittest
 
-from crypto_oi_monitor.alerts import ENTERED_HIGH_RISK
+from crypto_oi_monitor.alerts import ENTERED_HIGH_RISK, RECOVERED
 from crypto_oi_monitor.notifier import WeComNotifier
 
 
@@ -14,7 +14,7 @@ class RecordingClient:
 
 
 class WeComNotifierTests(unittest.TestCase):
-    def test_sends_high_risk_asset_with_ratio_and_venue_breakdown(self) -> None:
+    def test_sends_ambush_candidate_with_ratio_and_venue_breakdown(self) -> None:
         client = RecordingClient()
         notifier = WeComNotifier("https://wecom.example/webhook", client)
 
@@ -34,10 +34,29 @@ class WeComNotifierTests(unittest.TestCase):
 
         self.assertEqual(client.sent[0][0], "https://wecom.example/webhook")
         content = client.sent[0][1]["markdown"]["content"]
+        self.assertIn("OI 埋伏候选", content)
         self.assertIn("PEPE", content)
         self.assertIn("250.00 USD", content)
         self.assertIn("250.00%", content)
         self.assertIn("Binance", content)
+
+    def test_sends_ambush_candidate_exit_reminder(self) -> None:
+        client = RecordingClient()
+        notifier = WeComNotifier("https://wecom.example/webhook", client)
+
+        notifier.send(
+            RECOVERED,
+            {
+                "canonical_symbol": "PEPE",
+                "market_cap_usd": 100,
+                "total_oi_usd": 150,
+                "oi_to_market_cap": 1.5,
+                "contracts": [],
+            },
+        )
+
+        content = client.sent[0][1]["markdown"]["content"]
+        self.assertIn("退出 OI 埋伏候选", content)
 
 
 if __name__ == "__main__":

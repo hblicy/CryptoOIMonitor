@@ -25,9 +25,9 @@ class WeComNotifier:
 
 def _message(event: str, comparison: dict[str, Any]) -> str:
     if event == ENTERED_HIGH_RISK:
-        title = "<font color=\"warning\">【OI 高风险】</font>"
+        title = "<font color=\"warning\">【OI 埋伏候选】</font>"
     elif event == RECOVERED:
-        title = "<font color=\"info\">【OI 高风险恢复】</font>"
+        title = "<font color=\"info\">【退出 OI 埋伏候选】</font>"
     else:
         raise ValueError(f"Unsupported notification event: {event}")
 
