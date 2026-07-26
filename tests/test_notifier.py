@@ -33,12 +33,16 @@ class WeComNotifierTests(unittest.TestCase):
         )
 
         self.assertEqual(client.sent[0][0], "https://wecom.example/webhook")
-        content = client.sent[0][1]["markdown"]["content"]
+        payload = client.sent[0][1]
+        self.assertEqual(payload["msgtype"], "text")
+        content = payload["text"]["content"]
         self.assertIn("OI 埋伏候选", content)
         self.assertIn("PEPE", content)
         self.assertIn("250.00 USD", content)
         self.assertIn("250.00%", content)
         self.assertIn("Binance", content)
+        self.assertNotIn("<font", content)
+        self.assertNotIn("**", content)
 
     def test_sends_ambush_candidate_exit_reminder(self) -> None:
         client = RecordingClient()
@@ -55,8 +59,12 @@ class WeComNotifierTests(unittest.TestCase):
             },
         )
 
-        content = client.sent[0][1]["markdown"]["content"]
+        payload = client.sent[0][1]
+        self.assertEqual(payload["msgtype"], "text")
+        content = payload["text"]["content"]
         self.assertIn("退出 OI 埋伏候选", content)
+        self.assertNotIn("<font", content)
+        self.assertNotIn("**", content)
 
 
 if __name__ == "__main__":

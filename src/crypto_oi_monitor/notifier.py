@@ -17,7 +17,7 @@ class WeComNotifier:
     def send(self, event: str, comparison: dict[str, Any]) -> None:
         response = self.client.post_json(
             self.webhook_url,
-            {"msgtype": "markdown", "markdown": {"content": _message(event, comparison)}},
+            {"msgtype": "text", "text": {"content": _message(event, comparison)}},
         )
         if response["errcode"] != 0:
             raise RuntimeError(f"WeCom webhook rejected message: {response}")
@@ -25,21 +25,21 @@ class WeComNotifier:
 
 def _message(event: str, comparison: dict[str, Any]) -> str:
     if event == ENTERED_HIGH_RISK:
-        title = "<font color=\"warning\">【OI 埋伏候选】</font>"
+        title = "【OI 埋伏候选】"
     elif event == RECOVERED:
-        title = "<font color=\"info\">【退出 OI 埋伏候选】</font>"
+        title = "【退出 OI 埋伏候选】"
     else:
         raise ValueError(f"Unsupported notification event: {event}")
 
     venues = "\n".join(
-        f"- {contract['venue']}: {contract['oi_usd']:,.2f} USD"
+        f"{contract['venue']}：{contract['oi_usd']:,.2f} USD"
         for contract in comparison["contracts"]
     )
     return (
         f"{title}\n"
-        f"> 币种：**{comparison['canonical_symbol']}**\n"
-        f"> 聚合 OI：**{comparison['total_oi_usd']:,.2f} USD**\n"
-        f"> 市值：{comparison['market_cap_usd']:,.2f} USD\n"
-        f"> OI / 市值：**{comparison['oi_to_market_cap'] * 100:.2f}%**\n"
-        f"> 交易所明细：\n{venues}"
+        f"币种：{comparison['canonical_symbol']}\n"
+        f"聚合 OI：{comparison['total_oi_usd']:,.2f} USD\n"
+        f"市值：{comparison['market_cap_usd']:,.2f} USD\n"
+        f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%\n"
+        f"交易所明细：\n{venues}"
     )
