@@ -23,11 +23,13 @@ def dispatch_alerts(
     dispatched: list[str] = []
     for comparison in snapshot["comparisons"]:
         previous = store.get_alert_status(comparison["canonical_symbol"])
-        current = comparison["status"]
-        event = alert_transition(previous, current, snapshot_complete=True)
+        event = alert_transition(
+            previous,
+            comparison["oi_to_market_cap"],
+            snapshot_complete=True,
+        )
         if event is not None:
             notifier.send(event, comparison)
             dispatched.append(event)
-        if previous != current:
-            store.set_alert_status(comparison["canonical_symbol"], current)
+            store.set_alert_status(comparison["canonical_symbol"], comparison["status"])
     return dispatched

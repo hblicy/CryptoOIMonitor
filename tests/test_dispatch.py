@@ -23,21 +23,34 @@ class RecordingNotifier:
 
 
 class DispatchTests(unittest.TestCase):
-    def test_sends_once_on_high_risk_transition_and_persists_status(self) -> None:
+    def test_sends_one_entry_and_one_exit_across_hysteresis_band(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()
-        snapshot = {
-            "complete": True,
-            "comparisons": [{"canonical_symbol": "PEPE", "status": "high_risk"}],
-        }
+        snapshots = [
+            {"status": "high_risk", "oi_to_market_cap": 2.06},
+            {"status": "warning", "oi_to_market_cap": 1.98},
+            {"status": "high_risk", "oi_to_market_cap": 2.02},
+            {"status": "warning", "oi_to_market_cap": 1.94},
+        ]
 
-        dispatched = dispatch_alerts(snapshot, store, notifier)
-        repeated = dispatch_alerts(snapshot, store, notifier)
+        dispatched = [
+            dispatch_alerts(
+                {
+                    "complete": True,
+                    "comparisons": [{"canonical_symbol": "PEPE", **comparison}],
+                },
+                store,
+                notifier,
+            )
+            for comparison in snapshots
+        ]
 
-        self.assertEqual(dispatched, ["entered_high_risk"])
-        self.assertEqual(repeated, [])
-        self.assertEqual(notifier.events, [("entered_high_risk", "PEPE")])
-        self.assertEqual(store.statuses["PEPE"], "high_risk")
+        self.assertEqual(dispatched, [["entered_high_risk"], [], [], ["recovered"]])
+        self.assertEqual(
+            notifier.events,
+            [("entered_high_risk", "PEPE"), ("recovered", "PEPE")],
+        )
+        self.assertEqual(store.statuses["PEPE"], "warning")
 
 
 if __name__ == "__main__":
