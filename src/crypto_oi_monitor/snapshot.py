@@ -47,14 +47,14 @@ def build_snapshot(
             continue
         comparison = aggregate_asset(
             asset,
-            market_cap.coingecko_id,
+            market_cap.market_cap_id,
             market_cap.market_cap_usd,
             tuple(contracts_by_asset[asset]),
         )
         comparisons.append(
             {
                 "canonical_symbol": comparison.canonical_symbol,
-                "coingecko_id": comparison.coingecko_id,
+                "market_cap_id": comparison.market_cap_id,
                 "market_cap_usd": comparison.market_cap_usd,
                 "total_oi_usd": comparison.total_oi_usd,
                 "oi_to_market_cap": comparison.oi_to_market_cap,

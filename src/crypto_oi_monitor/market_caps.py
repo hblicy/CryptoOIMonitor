@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 
-COINGECKO_MARKETS_URL = "https://api.coingecko.com/api/v3/coins/markets"
+CMC_ID_MAP_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/map"
+CMC_QUOTES_URL = "https://pro-api.coinmarketcap.com/v3/cryptocurrency/quotes/latest"
 
 
 class MarketCapHttpClient(Protocol):
@@ -13,7 +14,7 @@ class MarketCapHttpClient(Protocol):
 
 @dataclass(frozen=True)
 class MarketCap:
-    coingecko_id: str
+    market_cap_id: str
     market_cap_usd: float
 
 
@@ -24,43 +25,85 @@ class MarketCapLookup:
 
 
 def parse_market_caps(
-    payload: list[dict[str, Any]], selected_assets: set[str]
+    mapping_payload: dict[str, Any],
+    quote_payload: dict[str, Any],
+    selected_assets: set[str],
 ) -> MarketCapLookup:
+    mapped_ids, unmapped = _mapped_ids(mapping_payload, selected_assets)
+    quotes_by_id = {str(item["id"]): item for item in _data(quote_payload)}
+    market_caps: dict[str, MarketCap] = {}
+    for asset, market_cap_id in mapped_ids.items():
+        quote = quotes_by_id.get(market_cap_id)
+        if quote is None:
+            unmapped.append(asset)
+            continue
+        market_cap_usd = quote["quote"]["USD"]["market_cap"]
+        if market_cap_usd is None:
+            unmapped.append(asset)
+            continue
+        market_caps[asset] = MarketCap(
+            market_cap_id, float(market_cap_usd)
+        )
+    return MarketCapLookup(market_caps, tuple(sorted(unmapped)))
+
+
+def _mapped_ids(
+    mapping_payload: dict[str, Any], selected_assets: set[str]
+) -> tuple[dict[str, str], list[str]]:
     candidates: dict[str, list[dict[str, Any]]] = {asset: [] for asset in selected_assets}
-    for item in payload:
+    for item in _data(mapping_payload):
         canonical = item["symbol"].upper()
-        if canonical in candidates and item["market_cap"] is not None:
+        if canonical in candidates:
             candidates[canonical].append(item)
 
-    market_caps: dict[str, MarketCap] = {}
+    mapped_ids: dict[str, str] = {}
     unmapped: list[str] = []
     for asset in sorted(selected_assets):
         matches = candidates[asset]
         if len(matches) != 1:
             unmapped.append(asset)
             continue
-        item = matches[0]
-        market_caps[asset] = MarketCap(item["id"], float(item["market_cap"]))
-    return MarketCapLookup(market_caps, tuple(unmapped))
+        mapped_ids[asset] = str(matches[0]["id"])
+
+    return mapped_ids, unmapped
 
 
 def fetch_market_caps(
     client: MarketCapHttpClient, selected_assets: set[str]
 ) -> MarketCapLookup:
-    payload: list[dict[str, Any]] = []
     ordered_assets = sorted(selected_assets)
-    for start in range(0, len(ordered_assets), 50):
-        symbols = ordered_assets[start : start + 50]
-        response = client.get_json(
-            COINGECKO_MARKETS_URL,
-            {
-                "vs_currency": "usd",
-                "symbols": ",".join(symbol.lower() for symbol in symbols),
-                "order": "market_cap_desc",
-                "per_page": "250",
-                "page": "1",
-                "sparkline": "false",
-            },
+    mapping_data: list[dict[str, Any]] = []
+    for start in range(0, len(ordered_assets), 100):
+        symbols = ordered_assets[start : start + 100]
+        mapping_data.extend(
+            _data(client.get_json(CMC_ID_MAP_URL, {"symbol": ",".join(symbols)}))
         )
-        payload.extend(response)
-    return parse_market_caps(payload, selected_assets)
+
+    mapping_payload = {"data": mapping_data}
+    mapped_ids, _ = _mapped_ids(mapping_payload, selected_assets)
+    if not mapped_ids:
+        return parse_market_caps(mapping_payload, {"data": []}, selected_assets)
+
+    quote_data: list[dict[str, Any]] = []
+    market_cap_ids = list(mapped_ids.values())
+    for start in range(0, len(market_cap_ids), 100):
+        ids = market_cap_ids[start : start + 100]
+        quote_data.extend(
+            _data(
+                client.get_json(
+                    CMC_QUOTES_URL,
+                    {"id": ",".join(ids), "convert": "USD", "skip_invalid": "true"},
+                )
+            )
+        )
+    return parse_market_caps(mapping_payload, {"data": quote_data}, selected_assets)
+
+
+def _data(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    status = payload.get("status")
+    if isinstance(status, dict) and status.get("error_code") not in (None, 0):
+        raise RuntimeError(status.get("error_message") or "CoinMarketCap API rejected request")
+    data = payload["data"]
+    if not isinstance(data, list):
+        raise TypeError("CoinMarketCap API data must be a list")
+    return data

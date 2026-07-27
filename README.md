@@ -1,11 +1,11 @@
 # 合约 OI / 市值监控
 
-汇总 Binance、OKX、Bybit、Bitget、Gate、KuCoin、MEXC、Hyperliquid、Aster 的永续合约 OI，并按 CoinGecko 市值计算 `OI / MC`。
+汇总 Binance、OKX、Bybit、Bitget、Gate、KuCoin、MEXC、Hyperliquid、Aster 的永续合约 OI，并按 CoinMarketCap 市值计算 `OI / MC`。
 
 - 币种池：仅 Binance USDⓈ 永续合约，且 24 小时美元成交额不少于 **1,000 万 USD**。
 - 黄色重点关注：`OI > MC`。
 - 红色埋伏候选：`OI > 2 × MC`。
-- 当任一交易所或 CoinGecko 本轮请求失败时，页面显示数据源错误并禁止企业微信阈值推送。
+- 当任一交易所或 CoinMarketCap 本轮请求失败时，页面显示数据源错误并禁止企业微信阈值推送。
 - 数据库保存每轮快照和企业微信推送状态；不会复用旧快照冒充本轮数据。
 
 ## 启动
@@ -16,7 +16,7 @@ npm install
 npm run build
 
 cd ..
-$env:COINGECKO_API_KEY = "你的 CoinGecko Demo API Key" # 可选，生产环境建议配置
+$env:COINMARKETCAP_API_KEY = "你的 CoinMarketCap Pro API Key" # 必填
 $env:WECOM_ROBOT_WEBHOOK_URL = "你的企业微信机器人 Webhook" # 启用提醒时必填
 python app.py --port 8766
 ```
@@ -24,6 +24,8 @@ python app.py --port 8766
 打开 <http://127.0.0.1:8766>。
 
 页面服务启动后立即刷新，之后默认每 120 秒刷新一次。Binance 和 Aster 需按交易对拉取 OI，首轮全量刷新通常需要约一分钟；页面会保留最近一次完整快照并显示其时间。
+
+CoinMarketCap 的市值查询按每 100 个返回币种计 1 个 Call Credit；默认刷新频率下请确认套餐额度充足。
 
 ## Ubuntu VPS 启停
 

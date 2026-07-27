@@ -165,7 +165,7 @@ function App() {
 
       <footer className="system-note">
         {summary?.notification?.message || (summary?.notification?.status === "ok" ? "企业微信关注提醒状态正常。" : "企业微信状态待刷新。")}
-        {summary?.unmapped_assets?.length ? ` CoinGecko 未映射：${summary.unmapped_assets.join("、")}` : ""}
+        {summary?.unmapped_assets?.length ? ` CoinMarketCap 未映射：${summary.unmapped_assets.join("、")}` : ""}
       </footer>
     </main>
   );
@@ -189,7 +189,7 @@ function DetailPanel({ selected }) {
   if (!selected) return <aside className="detail-panel empty-detail">暂无可展示的资产明细。</aside>;
   return (
     <aside className="detail-panel">
-      <header className="detail-heading"><div><strong>{selected.canonical_symbol}</strong><span>{selected.coingecko_id}</span></div></header>
+      <header className="detail-heading"><div><strong>{selected.canonical_symbol}</strong><span>{selected.market_cap_id}</span></div></header>
       <dl className="detail-metrics">
         <div><dt>市值（MC）</dt><dd>{formatUsd(selected.market_cap_usd)}</dd></div>
         <div><dt>聚合 OI（USD）</dt><dd>{formatUsd(selected.total_oi_usd)}</dd></div>

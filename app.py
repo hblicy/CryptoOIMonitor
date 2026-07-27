@@ -43,11 +43,8 @@ class MonitorApplication:
     def __init__(self) -> None:
         self.store = SnapshotStore(ROOT / "data" / "monitor.db")
         public_client = HttpJsonClient()
-        coin_gecko_key = os.environ.get("COINGECKO_API_KEY")
-        coin_gecko_headers = (
-            {"x-cg-demo-api-key": coin_gecko_key} if coin_gecko_key else None
-        )
-        coin_gecko_client = HttpJsonClient(coin_gecko_headers)
+        cmc_api_key = os.environ["COINMARKETCAP_API_KEY"]
+        cmc_client = HttpJsonClient({"X-CMC_PRO_API_KEY": cmc_api_key})
         self.coordinator = RefreshCoordinator(
             universe_loader=lambda: fetch_binance_universe(public_client),
             venue_loaders={
@@ -79,7 +76,7 @@ class MonitorApplication:
                     public_client, set(universe)
                 ),
             },
-            market_cap_loader=lambda assets: fetch_market_caps(coin_gecko_client, assets),
+            market_cap_loader=lambda assets: fetch_market_caps(cmc_client, assets),
             store=self.store,
             now=lambda: datetime.now(timezone.utc).isoformat(),
             persist=False,

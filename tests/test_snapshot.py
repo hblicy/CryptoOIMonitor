@@ -11,7 +11,7 @@ class SnapshotTests(unittest.TestCase):
             captured_at="2026-07-24T00:00:00+00:00",
             selected_assets={"ETH"},
             market_cap_lookup=MarketCapLookup(
-                {"ETH": MarketCap("ethereum", 100)}, ()
+                {"ETH": MarketCap("1027", 100)}, ()
             ),
             contracts_by_venue={
                 "Binance": [ContractOpenInterest("Binance", "ETHUSDT", 120)],
@@ -20,7 +20,7 @@ class SnapshotTests(unittest.TestCase):
             health={
                 "Binance": SourceHealth.ok(1),
                 "OKX": SourceHealth.ok(1),
-                "CoinGecko": SourceHealth.ok(1),
+                "CoinMarketCap": SourceHealth.ok(1),
             },
         )
 
@@ -37,28 +37,28 @@ class SnapshotTests(unittest.TestCase):
             contracts_by_venue={"Binance": []},
             health={
                 "Binance": SourceHealth.ok(0),
-                "CoinGecko": SourceHealth.failed("HTTP 429"),
+                "CoinMarketCap": SourceHealth.failed("HTTP 429"),
             },
         )
 
         self.assertFalse(snapshot["complete"])
         self.assertEqual(snapshot["comparisons"], [])
         self.assertEqual(snapshot["unmapped_assets"], ["ETH"])
-        self.assertEqual(snapshot["sources"]["CoinGecko"]["message"], "HTTP 429")
+        self.assertEqual(snapshot["sources"]["CoinMarketCap"]["message"], "HTTP 429")
 
     def test_uses_explicit_canonical_symbol_for_multiplier_contracts(self) -> None:
         snapshot = build_snapshot(
             captured_at="2026-07-24T00:00:00+00:00",
             selected_assets={"PEPE"},
             market_cap_lookup=MarketCapLookup(
-                {"PEPE": MarketCap("pepe", 100)}, ()
+                {"PEPE": MarketCap("2832", 100)}, ()
             ),
             contracts_by_venue={
                 "Binance": [
                     ContractOpenInterest("Binance", "1000PEPEUSDT", 120, "PEPE")
                 ]
             },
-            health={"Binance": SourceHealth.ok(1), "CoinGecko": SourceHealth.ok(1)},
+            health={"Binance": SourceHealth.ok(1), "CoinMarketCap": SourceHealth.ok(1)},
         )
 
         self.assertEqual(snapshot["comparisons"][0]["total_oi_usd"], 120)

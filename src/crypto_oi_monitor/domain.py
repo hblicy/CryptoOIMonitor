@@ -20,7 +20,7 @@ class ContractOpenInterest:
 @dataclass(frozen=True)
 class AssetComparison:
     canonical_symbol: str
-    coingecko_id: str
+    market_cap_id: str
     market_cap_usd: float
     total_oi_usd: float
     oi_to_market_cap: float
@@ -43,7 +43,7 @@ def is_binance_universe_member(contract_type: str, quote_volume_usd: float) -> b
 
 def aggregate_asset(
     canonical_symbol: str,
-    coingecko_id: str,
+    market_cap_id: str,
     market_cap_usd: float,
     contracts: tuple[ContractOpenInterest, ...],
 ) -> AssetComparison:
@@ -51,7 +51,7 @@ def aggregate_asset(
     oi_to_market_cap = total_oi_usd / market_cap_usd
     return AssetComparison(
         canonical_symbol=canonical_symbol,
-        coingecko_id=coingecko_id,
+        market_cap_id=market_cap_id,
         market_cap_usd=market_cap_usd,
         total_oi_usd=total_oi_usd,
         oi_to_market_cap=oi_to_market_cap,

@@ -59,7 +59,7 @@ class RefreshCoordinator:
             }
             pending[executor.submit(self.market_cap_loader, selected_assets)] = (
                 "market_cap",
-                "CoinGecko",
+                "CoinMarketCap",
             )
             market_cap_lookup: MarketCapLookup | None = None
             for future in as_completed(pending):

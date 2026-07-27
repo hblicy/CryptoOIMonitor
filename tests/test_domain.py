@@ -36,7 +36,7 @@ class AggregationTests(unittest.TestCase):
     def test_sums_venue_oi_and_calculates_ratio(self) -> None:
         comparison = aggregate_asset(
             canonical_symbol="ETH",
-            coingecko_id="ethereum",
+            market_cap_id="1027",
             market_cap_usd=100,
             contracts=(
                 ContractOpenInterest("Binance", "ETHUSDT", 80),
@@ -45,6 +45,7 @@ class AggregationTests(unittest.TestCase):
         )
 
         self.assertEqual(comparison.total_oi_usd, 135)
+        self.assertEqual(comparison.market_cap_id, "1027")
         self.assertEqual(comparison.oi_to_market_cap, 1.35)
         self.assertEqual(comparison.status, WARNING)
         self.assertEqual(comparison.covered_venues, ("Binance", "OKX"))

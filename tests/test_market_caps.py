@@ -1,42 +1,59 @@
 import unittest
 
-from crypto_oi_monitor.market_caps import COINGECKO_MARKETS_URL, fetch_market_caps, parse_market_caps
+from crypto_oi_monitor.market_caps import (
+    CMC_ID_MAP_URL,
+    CMC_QUOTES_URL,
+    fetch_market_caps,
+    parse_market_caps,
+)
 
 
-class CoinGeckoMarketCapTests(unittest.TestCase):
-    def test_uses_unique_matching_symbol(self) -> None:
+class CoinMarketCapMarketCapTests(unittest.TestCase):
+    def test_uses_unique_cmc_id_mapping_and_usd_market_cap(self) -> None:
         result = parse_market_caps(
-            [
-                {"id": "ethereum", "symbol": "eth", "market_cap": 300_000_000_000},
-                {"id": "bitcoin", "symbol": "btc", "market_cap": 2_000_000_000_000},
-            ],
+            {
+                "data": [
+                    {"id": 1027, "symbol": "ETH"},
+                    {"id": 1, "symbol": "BTC"},
+                ]
+            },
+            {
+                "data": [
+                    {"id": 1027, "quote": {"USD": {"market_cap": 300_000_000_000}}},
+                    {"id": 1, "quote": {"USD": {"market_cap": 2_000_000_000_000}}},
+                ]
+            },
             {"ETH", "BTC"},
         )
 
-        self.assertEqual(result.market_caps["ETH"].coingecko_id, "ethereum")
+        self.assertEqual(result.market_caps["ETH"].market_cap_id, "1027")
         self.assertEqual(result.market_caps["BTC"].market_cap_usd, 2_000_000_000_000)
         self.assertEqual(result.unmapped_assets, ())
 
     def test_leaves_ambiguous_symbol_unmapped(self) -> None:
         result = parse_market_caps(
-            [
-                {"id": "coin-a", "symbol": "aaa", "market_cap": 10},
-                {"id": "coin-b", "symbol": "aaa", "market_cap": 9},
-            ],
+            {"data": [{"id": 1, "symbol": "AAA"}, {"id": 2, "symbol": "AAA"}]},
+            {"data": []},
             {"AAA"},
         )
 
         self.assertEqual(result.market_caps, {})
         self.assertEqual(result.unmapped_assets, ("AAA",))
 
-    def test_fetches_market_caps_in_symbol_batches(self) -> None:
+    def test_fetches_mapping_then_quotes_by_cmc_id(self) -> None:
         class FakeClient:
             def __init__(self) -> None:
                 self.calls: list[tuple[str, dict[str, str]]] = []
 
             def get_json(self, url: str, params: dict[str, str]):
                 self.calls.append((url, params))
-                return [{"id": "ethereum", "symbol": "eth", "market_cap": 300}]
+                if url == CMC_ID_MAP_URL:
+                    return {"data": [{"id": 1027, "symbol": "ETH"}]}
+                return {
+                    "data": [
+                        {"id": 1027, "quote": {"USD": {"market_cap": 300}}}
+                    ]
+                }
 
         client = FakeClient()
         result = fetch_market_caps(client, {"ETH"})
@@ -45,17 +62,8 @@ class CoinGeckoMarketCapTests(unittest.TestCase):
         self.assertEqual(
             client.calls,
             [
-                (
-                    COINGECKO_MARKETS_URL,
-                    {
-                        "vs_currency": "usd",
-                        "symbols": "eth",
-                        "order": "market_cap_desc",
-                        "per_page": "250",
-                        "page": "1",
-                        "sparkline": "false",
-                    },
-                )
+                (CMC_ID_MAP_URL, {"symbol": "ETH"}),
+                (CMC_QUOTES_URL, {"id": "1027", "convert": "USD", "skip_invalid": "true"}),
             ],
         )
 
