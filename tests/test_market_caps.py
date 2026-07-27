@@ -9,6 +9,21 @@ from crypto_oi_monitor.market_caps import (
 
 
 class CoinMarketCapMarketCapTests(unittest.TestCase):
+    def test_accepts_string_zero_error_code_as_success(self) -> None:
+        result = parse_market_caps(
+            {
+                "status": {"error_code": "0", "error_message": ""},
+                "data": [{"id": 1, "symbol": "BTC"}],
+            },
+            {
+                "status": {"error_code": "0", "error_message": ""},
+                "data": [{"id": 1, "quote": {"USD": {"market_cap": 1_000}}}],
+            },
+            {"BTC"},
+        )
+
+        self.assertEqual(result.market_caps["BTC"].market_cap_usd, 1_000)
+
     def test_uses_unique_cmc_id_mapping_and_usd_market_cap(self) -> None:
         result = parse_market_caps(
             {

@@ -101,8 +101,12 @@ def fetch_market_caps(
 
 def _data(payload: dict[str, Any]) -> list[dict[str, Any]]:
     status = payload.get("status")
-    if isinstance(status, dict) and status.get("error_code") not in (None, 0):
-        raise RuntimeError(status.get("error_message") or "CoinMarketCap API rejected request")
+    if isinstance(status, dict):
+        error_code = status.get("error_code")
+        if error_code is not None and int(error_code) != 0:
+            raise RuntimeError(
+                status.get("error_message") or "CoinMarketCap API rejected request"
+            )
     data = payload["data"]
     if not isinstance(data, list):
         raise TypeError("CoinMarketCap API data must be a list")
