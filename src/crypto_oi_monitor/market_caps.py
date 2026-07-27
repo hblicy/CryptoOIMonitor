@@ -37,7 +37,7 @@ def parse_market_caps(
         if quote is None:
             unmapped.append(asset)
             continue
-        market_cap_usd = quote["quote"]["USD"]["market_cap"]
+        market_cap_usd = _usd_market_cap(quote)
         if market_cap_usd is None:
             unmapped.append(asset)
             continue
@@ -45,6 +45,16 @@ def parse_market_caps(
             market_cap_id, float(market_cap_usd)
         )
     return MarketCapLookup(market_caps, tuple(sorted(unmapped)))
+
+
+def _usd_market_cap(quote: dict[str, Any]) -> Any:
+    quote_data = quote["quote"]
+    if isinstance(quote_data, list):
+        for conversion in quote_data:
+            if conversion["symbol"] == "USD":
+                return conversion["market_cap"]
+        raise KeyError("USD quote is missing")
+    return quote_data["USD"]["market_cap"]
 
 
 def _mapped_ids(
