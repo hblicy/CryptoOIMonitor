@@ -8,7 +8,6 @@ RSI_PERIOD = 14
 ATR_PERIOD = 14
 EMA_PERIOD = 200
 LONG = "long"
-SHORT = "short"
 BINANCE_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
 
 
@@ -69,17 +68,6 @@ def evaluate_trade_setup(candles: list[Candle]) -> TradeSetup | None:
             current.close_time,
             current.close,
             current.close - 2 * atr,
-            rsi,
-            previous_rsi,
-            ema200,
-            atr,
-        )
-    if current.close < ema200 and previous_rsi > 80 >= rsi > 50:
-        return TradeSetup(
-            SHORT,
-            current.close_time,
-            current.close,
-            current.close + 2 * atr,
             rsi,
             previous_rsi,
             ema200,

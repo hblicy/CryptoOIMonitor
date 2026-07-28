@@ -7,7 +7,6 @@ from typing import Any, Callable, Protocol
 from .trading import (
     EMA_PERIOD,
     LONG,
-    SHORT,
     Candle,
     TradeSetup,
     current_rsi,
@@ -16,6 +15,7 @@ from .trading import (
 
 
 MAX_KLINE_WORKERS = 8
+LEGACY_SHORT_STATE = "short"
 
 
 @dataclass(frozen=True)
@@ -56,7 +56,10 @@ def dispatch_trade_signals(
     candidates = []
     for comparison in snapshot["comparisons"]:
         state = store.get_trade_signal_state(comparison["canonical_symbol"])
-        if comparison["oi_to_market_cap"] > 1 or state is not None:
+        if state == LEGACY_SHORT_STATE:
+            store.clear_trade_signal_state(comparison["canonical_symbol"])
+            continue
+        if comparison["oi_to_market_cap"] > 1 or state == LONG:
             candidates.append((comparison, state))
 
     candles_by_symbol: dict[str, list[Candle]] = {}
@@ -129,6 +132,4 @@ def _binance_symbol(comparison: dict[str, Any]) -> str:
 def _take_profit_reached(side: str, rsi: float) -> bool:
     if side == LONG:
         return rsi >= 50
-    if side == SHORT:
-        return rsi <= 50
     raise ValueError(f"Unsupported trade signal side: {side}")

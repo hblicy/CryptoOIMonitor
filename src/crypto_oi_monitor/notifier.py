@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from .alerts import ENTERED_HIGH_RISK, RECOVERED
-from .trading import LONG, SHORT, TradeSetup
+from .trading import LONG, TradeSetup
 
 
 class WeComHttpClient(Protocol):
@@ -60,12 +60,9 @@ def _message(event: str, comparison: dict[str, Any]) -> str:
 
 
 def _trade_message(signal: TradeSetup, comparison: dict[str, Any]) -> str:
-    if signal.side == LONG:
-        title = "【交易信号：做多】"
-    elif signal.side == SHORT:
-        title = "【交易信号：做空】"
-    else:
+    if signal.side != LONG:
         raise ValueError(f"Unsupported trade signal side: {signal.side}")
+    title = "【交易信号：做多】"
     return (
         f"{title}\n"
         f"币种：{comparison['canonical_symbol']}\n"

@@ -146,6 +146,33 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(notifier.signals, [])
         self.assertNotIn("PEPE", store.states)
 
+    def test_clears_legacy_short_state_without_loading_candles(self) -> None:
+        store = MemoryStore()
+        store.states["PEPE"] = "short"
+        notifier = RecordingNotifier()
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        result = dispatch_trade_signals(
+            snapshot,
+            lambda _: self.fail("legacy short state must not load candles"),
+            store,
+            notifier,
+        )
+
+        self.assertEqual(result.events, ())
+        self.assertEqual(result.failures, ())
+        self.assertEqual(notifier.signals, [])
+        self.assertNotIn("PEPE", store.states)
+
     def test_skips_short_history_and_continues_with_other_symbols(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()

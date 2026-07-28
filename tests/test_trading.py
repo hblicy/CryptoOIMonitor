@@ -3,7 +3,6 @@ import unittest
 from crypto_oi_monitor.trading import (
     BINANCE_KLINES_URL,
     LONG,
-    SHORT,
     Candle,
     evaluate_trade_setup,
     fetch_binance_closed_candles,
@@ -67,21 +66,14 @@ class TradeSetupTests(unittest.TestCase):
         self.assertLess(signal.previous_rsi, 20)
         self.assertGreater(signal.entry_price, signal.ema200)
 
-    def test_emits_short_when_rsi_crosses_down_80_below_ema200(self) -> None:
+    def test_does_not_emit_short_when_rsi_crosses_down_80_below_ema200(self) -> None:
         candles = _candles(
             [300 - index for index in range(200)]
             + [102 + index for index in range(60)]
             + [154]
         )
 
-        signal = evaluate_trade_setup(candles)
-
-        self.assertEqual(signal.side, SHORT)
-        self.assertEqual(signal.entry_price, 154)
-        self.assertGreater(signal.stop_loss, signal.entry_price)
-        self.assertLess(signal.rsi, 80)
-        self.assertGreater(signal.previous_rsi, 80)
-        self.assertLess(signal.entry_price, signal.ema200)
+        self.assertIsNone(evaluate_trade_setup(candles))
 
     def test_does_not_emit_entry_after_rsi_reaches_50(self) -> None:
         long_candles = _candles(

@@ -104,6 +104,24 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertNotIn("<font", content)
         self.assertNotIn("**", content)
 
+    def test_rejects_short_trade_signals(self) -> None:
+        notifier = WeComNotifier("https://wecom.example/webhook", RecordingClient())
+
+        with self.assertRaisesRegex(ValueError, "Unsupported trade signal side"):
+            notifier.send_trade_signal(
+                TradeSetup(
+                    side="short",
+                    candle_close_time=1_000,
+                    entry_price=246,
+                    stop_loss=250,
+                    rsi=65,
+                    previous_rsi=90,
+                    ema200=250,
+                    atr=3,
+                ),
+                {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.2},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
