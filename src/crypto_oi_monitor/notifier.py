@@ -45,17 +45,12 @@ def _message(event: str, comparison: dict[str, Any]) -> str:
     else:
         raise ValueError(f"Unsupported notification event: {event}")
 
-    venues = "\n".join(
-        f"{contract['venue']}：{contract['oi_usd']:,.2f} USD"
-        for contract in comparison["contracts"]
-    )
     return (
         f"{title}\n"
         f"币种：{comparison['canonical_symbol']}\n"
         f"聚合 OI：{comparison['total_oi_usd']:,.2f} USD\n"
         f"市值：{comparison['market_cap_usd']:,.2f} USD\n"
-        f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%\n"
-        f"交易所明细：\n{venues}"
+        f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%"
     )
 
 

@@ -15,7 +15,7 @@ class RecordingClient:
 
 
 class WeComNotifierTests(unittest.TestCase):
-    def test_sends_ambush_candidate_with_ratio_and_venue_breakdown(self) -> None:
+    def test_sends_ambush_candidate_with_aggregate_metrics_only(self) -> None:
         client = RecordingClient()
         notifier = WeComNotifier("https://wecom.example/webhook", client)
 
@@ -41,7 +41,8 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertIn("PEPE", content)
         self.assertIn("250.00 USD", content)
         self.assertIn("250.00%", content)
-        self.assertIn("Binance", content)
+        self.assertNotIn("交易所明细", content)
+        self.assertNotIn("Bybit", content)
         self.assertNotIn("<font", content)
         self.assertNotIn("**", content)
 
@@ -64,6 +65,7 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertEqual(payload["msgtype"], "text")
         content = payload["text"]["content"]
         self.assertIn("退出 OI 埋伏候选", content)
+        self.assertNotIn("交易所明细", content)
         self.assertNotIn("<font", content)
         self.assertNotIn("**", content)
 
