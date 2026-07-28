@@ -1,5 +1,6 @@
 import unittest
 
+from crypto_oi_monitor.http_client import DataSourceRequestError
 from crypto_oi_monitor.market_caps import (
     CMC_ID_MAP_URL,
     CMC_QUOTES_URL,
@@ -100,6 +101,67 @@ class CoinMarketCapMarketCapTests(unittest.TestCase):
                 (CMC_QUOTES_URL, {"id": "1027", "convert": "USD", "skip_invalid": "true"}),
             ],
         )
+
+    def test_skips_only_symbols_rejected_by_cmc_map(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, str]]] = []
+
+            def get_json(self, url: str, params: dict[str, str]):
+                self.calls.append((url, params))
+                if url == CMC_ID_MAP_URL:
+                    if "BROCCOLIF3B" in params["symbol"]:
+                        error = DataSourceRequestError("CMC map rejected symbols")
+                        error.status_code = 400
+                        error.response_payload = {
+                            "status": {
+                                "error_message": (
+                                    'Invalid values for "symbol": "BROCCOLIF3B,DODOX"'
+                                )
+                            }
+                        }
+                        raise error
+                    return {"data": [{"id": 1027, "symbol": "ETH"}]}
+                return {
+                    "data": [
+                        {"id": 1027, "quote": {"USD": {"market_cap": 300}}}
+                    ]
+                }
+
+        client = FakeClient()
+        with self.assertLogs("crypto_oi_monitor.market_caps", "WARNING") as logs:
+            result = fetch_market_caps(client, {"BROCCOLIF3B", "DODOX", "ETH"})
+
+        self.assertEqual(result.market_caps["ETH"].market_cap_usd, 300)
+        self.assertEqual(result.unmapped_assets, ("BROCCOLIF3B", "DODOX"))
+        self.assertIn("BROCCOLIF3B, DODOX", logs.output[0])
+        self.assertEqual(
+            client.calls,
+            [
+                (
+                    CMC_ID_MAP_URL,
+                    {"symbol": "BROCCOLIF3B,DODOX,ETH"},
+                ),
+                (CMC_ID_MAP_URL, {"symbol": "ETH"}),
+                (
+                    CMC_QUOTES_URL,
+                    {"id": "1027", "convert": "USD", "skip_invalid": "true"},
+                ),
+            ],
+        )
+
+    def test_does_not_ignore_other_cmc_map_errors(self) -> None:
+        class FakeClient:
+            def get_json(self, url: str, params: dict[str, str]):
+                error = DataSourceRequestError("CMC authentication failed")
+                error.status_code = 401
+                error.response_payload = {
+                    "status": {"error_message": "API key is invalid"}
+                }
+                raise error
+
+        with self.assertRaisesRegex(DataSourceRequestError, "authentication failed"):
+            fetch_market_caps(FakeClient(), {"ETH"})
 
 
 if __name__ == "__main__":

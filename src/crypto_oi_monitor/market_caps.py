@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+import re
 from typing import Any, Protocol
+
+from .http_client import DataSourceRequestError
 
 
 CMC_ID_MAP_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/map"
 CMC_QUOTES_URL = "https://pro-api.coinmarketcap.com/v3/cryptocurrency/quotes/latest"
+LOGGER = logging.getLogger(__name__)
 
 
 class MarketCapHttpClient(Protocol):
@@ -85,9 +90,7 @@ def fetch_market_caps(
     mapping_data: list[dict[str, Any]] = []
     for start in range(0, len(ordered_assets), 100):
         symbols = ordered_assets[start : start + 100]
-        mapping_data.extend(
-            _data(client.get_json(CMC_ID_MAP_URL, {"symbol": ",".join(symbols)}))
-        )
+        mapping_data.extend(_fetch_mapping_batch(client, symbols))
 
     mapping_payload = {"data": mapping_data}
     mapped_ids, _ = _mapped_ids(mapping_payload, selected_assets)
@@ -107,6 +110,50 @@ def fetch_market_caps(
             )
         )
     return parse_market_caps(mapping_payload, {"data": quote_data}, selected_assets)
+
+
+def _fetch_mapping_batch(
+    client: MarketCapHttpClient, symbols: list[str]
+) -> list[dict[str, Any]]:
+    remaining_symbols = symbols
+    while remaining_symbols:
+        try:
+            return _data(
+                client.get_json(
+                    CMC_ID_MAP_URL,
+                    {"symbol": ",".join(remaining_symbols)},
+                )
+            )
+        except DataSourceRequestError as error:
+            invalid_symbols = _invalid_map_symbols(error)
+            if invalid_symbols is None:
+                raise
+            unsupported_symbols = sorted(set(remaining_symbols) & invalid_symbols)
+            if not unsupported_symbols:
+                raise
+            LOGGER.warning(
+                "CoinMarketCap does not support symbols: %s",
+                ", ".join(unsupported_symbols),
+            )
+            remaining_symbols = [
+                symbol for symbol in remaining_symbols if symbol not in invalid_symbols
+            ]
+    return []
+
+
+def _invalid_map_symbols(error: DataSourceRequestError) -> set[str] | None:
+    if error.status_code != 400 or not isinstance(error.response_payload, dict):
+        return None
+    status = error.response_payload.get("status")
+    if not isinstance(status, dict):
+        return None
+    error_message = status.get("error_message")
+    if not isinstance(error_message, str):
+        return None
+    match = re.fullmatch(r'Invalid values for "symbol": "(.+)"', error_message)
+    if match is None:
+        return None
+    return {symbol.upper() for symbol in match.group(1).split(",")}
 
 
 def _data(payload: dict[str, Any]) -> list[dict[str, Any]]:
