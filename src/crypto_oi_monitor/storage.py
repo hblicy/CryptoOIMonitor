@@ -34,6 +34,14 @@ class SnapshotStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_signal_states (
+                    canonical_symbol TEXT PRIMARY KEY,
+                    side TEXT NOT NULL
+                )
+                """
+            )
 
     def save_snapshot(self, snapshot: dict[str, Any]) -> None:
         with self._connect() as connection:
@@ -66,4 +74,30 @@ class SnapshotStore:
                 ON CONFLICT(canonical_symbol) DO UPDATE SET status = excluded.status
                 """,
                 (canonical_symbol, status),
+            )
+
+    def get_trade_signal_state(self, canonical_symbol: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT side FROM trade_signal_states WHERE canonical_symbol = ?",
+                (canonical_symbol,),
+            ).fetchone()
+        return None if row is None else str(row[0])
+
+    def set_trade_signal_state(self, canonical_symbol: str, side: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO trade_signal_states (canonical_symbol, side)
+                VALUES (?, ?)
+                ON CONFLICT(canonical_symbol) DO UPDATE SET side = excluded.side
+                """,
+                (canonical_symbol, side),
+            )
+
+    def clear_trade_signal_state(self, canonical_symbol: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM trade_signal_states WHERE canonical_symbol = ?",
+                (canonical_symbol,),
             )

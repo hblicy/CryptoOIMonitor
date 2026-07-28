@@ -18,6 +18,16 @@ class SnapshotStoreTests(unittest.TestCase):
             self.assertEqual(store.get_alert_status("ETH"), "high_risk")
             self.assertIsNone(store.get_alert_status("BTC"))
 
+    def test_persists_and_clears_trade_signal_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SnapshotStore(Path(temp_dir) / "monitor.db")
+
+            store.set_trade_signal_state("ETH", "long")
+
+            self.assertEqual(store.get_trade_signal_state("ETH"), "long")
+            store.clear_trade_signal_state("ETH")
+            self.assertIsNone(store.get_trade_signal_state("ETH"))
+
 
 if __name__ == "__main__":
     unittest.main()

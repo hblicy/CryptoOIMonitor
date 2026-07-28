@@ -2,6 +2,7 @@ import unittest
 
 from crypto_oi_monitor.alerts import ENTERED_HIGH_RISK, RECOVERED
 from crypto_oi_monitor.notifier import WeComNotifier
+from crypto_oi_monitor.trading import LONG, TradeSetup
 
 
 class RecordingClient:
@@ -63,6 +64,43 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertEqual(payload["msgtype"], "text")
         content = payload["text"]["content"]
         self.assertIn("退出 OI 埋伏候选", content)
+        self.assertNotIn("<font", content)
+        self.assertNotIn("**", content)
+
+    def test_sends_long_trade_signal_with_entry_and_stop(self) -> None:
+        client = RecordingClient()
+        notifier = WeComNotifier("https://wecom.example/webhook", client)
+
+        notifier.send_trade_signal(
+            TradeSetup(
+                side=LONG,
+                candle_close_time=1_000,
+                entry_price=246,
+                stop_loss=240,
+                rsi=35,
+                previous_rsi=10,
+                ema200=229,
+                atr=3,
+            ),
+            {
+                "canonical_symbol": "PEPE",
+                "oi_to_market_cap": 1.2,
+                "total_oi_usd": 120,
+                "market_cap_usd": 100,
+                "contracts": [],
+            },
+        )
+
+        payload = client.sent[0][1]
+        content = payload["text"]["content"]
+        self.assertEqual(payload["msgtype"], "text")
+        self.assertIn("交易信号：做多", content)
+        self.assertIn("PEPE", content)
+        self.assertIn("参考入场：246.00000000", content)
+        self.assertIn("止损：240.00000000", content)
+        self.assertIn("RSI(14) 回到 50", content)
+        self.assertIn("杠杆参考：2-3倍", content)
+        self.assertIn("OI / 市值：120.00%", content)
         self.assertNotIn("<font", content)
         self.assertNotIn("**", content)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from .alerts import ENTERED_HIGH_RISK, RECOVERED
+from .trading import LONG, SHORT, TradeSetup
 
 
 class WeComHttpClient(Protocol):
@@ -18,6 +19,19 @@ class WeComNotifier:
         response = self.client.post_json(
             self.webhook_url,
             {"msgtype": "text", "text": {"content": _message(event, comparison)}},
+        )
+        if response["errcode"] != 0:
+            raise RuntimeError(f"WeCom webhook rejected message: {response}")
+
+    def send_trade_signal(
+        self, signal: TradeSetup, comparison: dict[str, Any]
+    ) -> None:
+        response = self.client.post_json(
+            self.webhook_url,
+            {
+                "msgtype": "text",
+                "text": {"content": _trade_message(signal, comparison)},
+            },
         )
         if response["errcode"] != 0:
             raise RuntimeError(f"WeCom webhook rejected message: {response}")
@@ -42,4 +56,26 @@ def _message(event: str, comparison: dict[str, Any]) -> str:
         f"市值：{comparison['market_cap_usd']:,.2f} USD\n"
         f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%\n"
         f"交易所明细：\n{venues}"
+    )
+
+
+def _trade_message(signal: TradeSetup, comparison: dict[str, Any]) -> str:
+    if signal.side == LONG:
+        title = "【交易信号：做多】"
+    elif signal.side == SHORT:
+        title = "【交易信号：做空】"
+    else:
+        raise ValueError(f"Unsupported trade signal side: {signal.side}")
+    return (
+        f"{title}\n"
+        f"币种：{comparison['canonical_symbol']}\n"
+        f"周期：15m（已收盘）\n"
+        f"参考入场：{signal.entry_price:.8f}\n"
+        f"止损：{signal.stop_loss:.8f}（2 × ATR(14)）\n"
+        f"止盈条件：RSI(14) 回到 50\n"
+        f"杠杆参考：2-3倍\n"
+        f"RSI(14)：{signal.rsi:.2f}\n"
+        f"EMA200：{signal.ema200:.8f}\n"
+        f"ATR(14)：{signal.atr:.8f}\n"
+        f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%"
     )

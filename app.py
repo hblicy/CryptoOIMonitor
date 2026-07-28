@@ -35,6 +35,8 @@ from crypto_oi_monitor.sources import (
     fetch_okx_open_interest,
 )
 from crypto_oi_monitor.storage import SnapshotStore
+from crypto_oi_monitor.trade_dispatch import dispatch_trade_signals
+from crypto_oi_monitor.trading import fetch_binance_closed_candles
 
 LOGGER = logging.getLogger("crypto_oi_monitor")
 
@@ -81,6 +83,9 @@ class MonitorApplication:
             now=lambda: datetime.now(timezone.utc).isoformat(),
             persist=False,
         )
+        self.trade_kline_loader = lambda symbol: fetch_binance_closed_candles(
+            public_client, symbol
+        )
         webhook_url = os.environ.get("WECOM_ROBOT_WEBHOOK_URL")
         self.notifier = (
             WeComNotifier(webhook_url, HttpJsonClient()) if webhook_url else None
@@ -104,13 +109,59 @@ class MonitorApplication:
             else:
                 try:
                     events = dispatch_alerts(snapshot, self.store, self.notifier)
-                    snapshot["notification"] = {"status": "ok", "events": events}
                 except Exception as error:
                     LOGGER.exception("企业微信推送失败")
                     snapshot["notification"] = {
                         "status": "error",
                         "message": f"{type(error).__name__}: {error}",
                     }
+                else:
+                    try:
+                        trade_result = dispatch_trade_signals(
+                            snapshot,
+                            self.trade_kline_loader,
+                            self.store,
+                            self.notifier,
+                        )
+                    except Exception as error:
+                        LOGGER.exception("交易信号推送失败")
+                        snapshot["notification"] = {
+                            "status": "partial",
+                            "events": events,
+                            "trade_signal_status": "error",
+                            "message": f"交易信号失败：{type(error).__name__}: {error}",
+                        }
+                    else:
+                        if trade_result.failures:
+                            for failure in trade_result.failures:
+                                LOGGER.warning(
+                                    "交易信号已跳过 %s：%s",
+                                    failure.canonical_symbol,
+                                    failure.message,
+                                )
+                            snapshot["notification"] = {
+                                "status": "partial",
+                                "events": events,
+                                "trade_signal_events": list(trade_result.events),
+                                "trade_signal_failures": [
+                                    {
+                                        "canonical_symbol": failure.canonical_symbol,
+                                        "message": failure.message,
+                                    }
+                                    for failure in trade_result.failures
+                                ],
+                                "message": "交易信号部分失败："
+                                + "；".join(
+                                    f"{failure.canonical_symbol}: {failure.message}"
+                                    for failure in trade_result.failures
+                                ),
+                            }
+                        else:
+                            snapshot["notification"] = {
+                                "status": "ok",
+                                "events": events,
+                                "trade_signal_events": list(trade_result.events),
+                            }
             self.store.save_snapshot(snapshot)
             self._latest = snapshot
             return snapshot
