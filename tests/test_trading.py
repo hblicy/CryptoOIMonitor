@@ -50,20 +50,21 @@ class TradeSetupTests(unittest.TestCase):
             ],
         )
 
-    def test_emits_long_when_rsi_crosses_up_20_above_ema200(self) -> None:
+    def test_emits_long_when_rsi_is_below_50_above_ema200_without_20_cross(self) -> None:
         candles = _candles(
             [100 + index for index in range(200)]
             + [298 - index for index in range(60)]
-            + [246]
+            + [246, 247]
         )
 
         signal = evaluate_trade_setup(candles)
 
         self.assertEqual(signal.side, LONG)
-        self.assertEqual(signal.entry_price, 246)
+        self.assertEqual(signal.entry_price, 247)
         self.assertLess(signal.stop_loss, signal.entry_price)
         self.assertGreater(signal.rsi, 20)
-        self.assertLess(signal.previous_rsi, 20)
+        self.assertGreater(signal.previous_rsi, 20)
+        self.assertLess(signal.rsi, 50)
         self.assertGreater(signal.entry_price, signal.ema200)
 
     def test_does_not_emit_short_when_rsi_crosses_down_80_below_ema200(self) -> None:

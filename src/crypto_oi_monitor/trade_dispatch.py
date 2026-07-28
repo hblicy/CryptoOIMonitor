@@ -16,6 +16,7 @@ from .trading import (
 
 MAX_KLINE_WORKERS = 8
 LEGACY_SHORT_STATE = "short"
+STOP_LONG = "stop_long"
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,8 @@ class TradeSignalNotifier(Protocol):
     def send_trade_signal(
         self, signal: TradeSetup, comparison: dict[str, Any]
     ) -> None: ...
+
+    def send_stop_long(self, comparison: dict[str, Any], rsi: float) -> None: ...
 
 
 def dispatch_trade_signals(
@@ -105,8 +108,11 @@ def dispatch_trade_signals(
         if candles is None:
             continue
         if state is not None:
-            if _take_profit_reached(state, current_rsi(candles)):
+            rsi = current_rsi(candles)
+            if _take_profit_reached(state, rsi):
+                notifier.send_stop_long(comparison, rsi)
                 store.clear_trade_signal_state(canonical_symbol)
+                dispatched.append(STOP_LONG)
             else:
                 continue
         if comparison["oi_to_market_cap"] <= 1:
@@ -131,5 +137,5 @@ def _binance_symbol(comparison: dict[str, Any]) -> str:
 
 def _take_profit_reached(side: str, rsi: float) -> bool:
     if side == LONG:
-        return rsi >= 50
+        return rsi > 50
     raise ValueError(f"Unsupported trade signal side: {side}")

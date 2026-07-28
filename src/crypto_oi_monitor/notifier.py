@@ -36,6 +36,17 @@ class WeComNotifier:
         if response["errcode"] != 0:
             raise RuntimeError(f"WeCom webhook rejected message: {response}")
 
+    def send_stop_long(self, comparison: dict[str, Any], rsi: float) -> None:
+        response = self.client.post_json(
+            self.webhook_url,
+            {
+                "msgtype": "text",
+                "text": {"content": _stop_long_message(comparison, rsi)},
+            },
+        )
+        if response["errcode"] != 0:
+            raise RuntimeError(f"WeCom webhook rejected message: {response}")
+
 
 def _message(event: str, comparison: dict[str, Any]) -> str:
     if event == ENTERED_HIGH_RISK:
@@ -64,10 +75,21 @@ def _trade_message(signal: TradeSetup, comparison: dict[str, Any]) -> str:
         f"周期：15m（已收盘）\n"
         f"参考入场：{signal.entry_price:.8f}\n"
         f"止损：{signal.stop_loss:.8f}（2 × ATR(14)）\n"
-        f"止盈条件：RSI(14) 回到 50\n"
+        f"停止开多条件：RSI(14) 超过 50\n"
         f"杠杆参考：2-3倍\n"
         f"RSI(14)：{signal.rsi:.2f}\n"
         f"EMA200：{signal.ema200:.8f}\n"
         f"ATR(14)：{signal.atr:.8f}\n"
+        f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%"
+    )
+
+
+def _stop_long_message(comparison: dict[str, Any], rsi: float) -> str:
+    return (
+        "【交易信号：停止开多】\n"
+        f"币种：{comparison['canonical_symbol']}\n"
+        "周期：15m（已收盘）\n"
+        f"RSI(14)：{rsi:.2f}\n"
+        "原因：RSI(14) 已超过 50，请勿继续开多。\n"
         f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%"
     )

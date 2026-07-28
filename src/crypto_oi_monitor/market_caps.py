@@ -13,6 +13,7 @@ from .http_client import DataSourceRequestError
 CMC_ID_MAP_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/map"
 CMC_QUOTES_URL = "https://pro-api.coinmarketcap.com/v3/cryptocurrency/quotes/latest"
 CMC_UNMAPPED_RETRY_SECONDS = 3600
+CMC_SYMBOL_ALIASES = {"PHAROS": "PROS"}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -143,10 +144,12 @@ def _mapped_ids(
     mapping_payload: dict[str, Any], selected_assets: set[str]
 ) -> tuple[dict[str, str], list[str]]:
     candidates: dict[str, list[dict[str, Any]]] = {asset: [] for asset in selected_assets}
+    assets_by_cmc_symbol: dict[str, list[str]] = {}
+    for asset in selected_assets:
+        assets_by_cmc_symbol.setdefault(CMC_SYMBOL_ALIASES.get(asset, asset), []).append(asset)
     for item in _data(mapping_payload):
-        canonical = item["symbol"].upper()
-        if canonical in candidates:
-            candidates[canonical].append(item)
+        for asset in assets_by_cmc_symbol.get(item["symbol"].upper(), []):
+            candidates[asset].append(item)
 
     mapped_ids: dict[str, str] = {}
     unmapped: list[str] = []
@@ -167,7 +170,12 @@ def fetch_market_caps(
     mapping_assets: set[str] | None = None,
 ) -> MarketCapLookup:
     if mapping_cache is None:
-        mapping_payload = {"data": _fetch_mapping_data(client, sorted(selected_assets))}
+        mapping_payload = {
+            "data": _fetch_mapping_data(
+                client,
+                sorted({CMC_SYMBOL_ALIASES.get(asset, asset) for asset in selected_assets}),
+            )
+        }
         mapped_ids, _ = _mapped_ids(mapping_payload, selected_assets)
     else:
         mapping_targets = selected_assets if mapping_assets is None else mapping_assets
@@ -177,7 +185,12 @@ def fetch_market_caps(
             if asset in selected_assets and asset not in mapping_cache
         )
         if unknown_assets:
-            mapping_payload = {"data": _fetch_mapping_data(client, unknown_assets)}
+            mapping_payload = {
+                "data": _fetch_mapping_data(
+                    client,
+                    sorted({CMC_SYMBOL_ALIASES.get(asset, asset) for asset in unknown_assets}),
+                )
+            }
             mapped_unknown_assets, _ = _mapped_ids(mapping_payload, set(unknown_assets))
             mapping_cache.update(mapped_unknown_assets)
         mapped_ids = {
@@ -252,7 +265,7 @@ def _invalid_map_symbols(error: DataSourceRequestError) -> set[str] | None:
     error_message = status.get("error_message")
     if not isinstance(error_message, str):
         return None
-    match = re.fullmatch(r'Invalid values for "symbol": "(.+)"', error_message)
+    match = re.fullmatch(r'Invalid values? for "symbol": "(.+)"', error_message)
     if match is None:
         return None
     return {symbol.upper() for symbol in match.group(1).split(",")}

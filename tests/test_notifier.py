@@ -100,8 +100,27 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertIn("PEPE", content)
         self.assertIn("参考入场：246.00000000", content)
         self.assertIn("止损：240.00000000", content)
-        self.assertIn("RSI(14) 回到 50", content)
+        self.assertIn("RSI(14) 超过 50", content)
         self.assertIn("杠杆参考：2-3倍", content)
+        self.assertIn("OI / 市值：120.00%", content)
+        self.assertNotIn("<font", content)
+        self.assertNotIn("**", content)
+
+    def test_sends_stop_long_message_after_rsi_exceeds_50(self) -> None:
+        client = RecordingClient()
+        notifier = WeComNotifier("https://wecom.example/webhook", client)
+
+        notifier.send_stop_long(
+            {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.2}, 52.5
+        )
+
+        payload = client.sent[0][1]
+        content = payload["text"]["content"]
+        self.assertEqual(payload["msgtype"], "text")
+        self.assertIn("交易信号：停止开多", content)
+        self.assertIn("PEPE", content)
+        self.assertIn("RSI(14)：52.50", content)
+        self.assertIn("请勿继续开多", content)
         self.assertIn("OI / 市值：120.00%", content)
         self.assertNotIn("<font", content)
         self.assertNotIn("**", content)

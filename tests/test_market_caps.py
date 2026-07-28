@@ -113,6 +113,33 @@ class CoinMarketCapMarketCapTests(unittest.TestCase):
             ],
         )
 
+    def test_maps_pharos_with_its_cmc_pros_symbol(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, str]]] = []
+
+            def get_json(self, url: str, params: dict[str, str]):
+                self.calls.append((url, params))
+                if url == CMC_ID_MAP_URL:
+                    return {"data": [{"id": 9999, "symbol": "PROS"}]}
+                return {
+                    "data": [
+                        {"id": 9999, "quote": {"USD": {"market_cap": 300}}}
+                    ]
+                }
+
+        client = FakeClient()
+        result = fetch_market_caps(client, {"PHAROS"})
+
+        self.assertEqual(result.market_caps["PHAROS"].market_cap_usd, 300)
+        self.assertEqual(
+            client.calls,
+            [
+                (CMC_ID_MAP_URL, {"symbol": "PROS"}),
+                (CMC_QUOTES_URL, {"id": "9999", "convert": "USD", "skip_invalid": "true"}),
+            ],
+        )
+
     def test_maps_assets_when_given_an_empty_mapping_cache(self) -> None:
         class FakeClient:
             def get_json(self, url: str, params: dict[str, str]):
@@ -246,6 +273,31 @@ class CoinMarketCapMarketCapTests(unittest.TestCase):
                 ),
             ],
         )
+
+    def test_skips_symbol_rejected_with_singular_cmc_error(self) -> None:
+        class FakeClient:
+            def get_json(self, url: str, params: dict[str, str]):
+                if url == CMC_ID_MAP_URL:
+                    if "INVALID" in params["symbol"]:
+                        error = DataSourceRequestError("CMC map rejected symbol")
+                        error.status_code = 400
+                        error.response_payload = {
+                            "status": {
+                                "error_message": 'Invalid value for "symbol": "INVALID"'
+                            }
+                        }
+                        raise error
+                    return {"data": [{"id": 1027, "symbol": "ETH"}]}
+                return {
+                    "data": [
+                        {"id": 1027, "quote": {"USD": {"market_cap": 300}}}
+                    ]
+                }
+
+        result = fetch_market_caps(FakeClient(), {"ETH", "INVALID"})
+
+        self.assertEqual(result.market_caps["ETH"].market_cap_usd, 300)
+        self.assertEqual(result.unmapped_assets, ("INVALID",))
 
     def test_does_not_ignore_other_cmc_map_errors(self) -> None:
         class FakeClient:

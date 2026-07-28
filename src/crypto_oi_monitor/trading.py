@@ -62,7 +62,7 @@ def evaluate_trade_setup(candles: list[Candle]) -> TradeSetup | None:
     atr = _atr(candles, ATR_PERIOD)
     current = candles[-1]
 
-    if current.close > ema200 and previous_rsi < 20 <= rsi < 50:
+    if current.close > ema200 and rsi < 50:
         return TradeSetup(
             LONG,
             current.close_time,
