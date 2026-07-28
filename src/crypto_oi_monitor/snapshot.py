@@ -11,17 +11,23 @@ class SourceHealth:
     status: str
     count: int | None = None
     message: str | None = None
+    updated_at: str | None = None
 
     @classmethod
-    def ok(cls, count: int) -> "SourceHealth":
-        return cls(status="ok", count=count)
+    def ok(cls, count: int, updated_at: str | None = None) -> "SourceHealth":
+        return cls(status="ok", count=count, updated_at=updated_at)
 
     @classmethod
     def failed(cls, message: str) -> "SourceHealth":
         return cls(status="error", message=message)
 
     def as_dict(self) -> dict[str, int | str | None]:
-        return {"status": self.status, "count": self.count, "message": self.message}
+        return {
+            "status": self.status,
+            "count": self.count,
+            "message": self.message,
+            "updated_at": self.updated_at,
+        }
 
 
 def build_snapshot(

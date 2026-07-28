@@ -26,7 +26,7 @@ class RefreshCoordinatorTests(unittest.TestCase):
                 "OKX": lambda assets: (_ for _ in ()).throw(RuntimeError("source down")),
             },
             market_cap_loader=lambda assets: MarketCapLookup(
-                {"ETH": MarketCap("ethereum", 100)}, ()
+                {"ETH": MarketCap("ethereum", 100)}, (), "2026-07-24T00:00:00+00:00"
             ),
             store=store,
             now=lambda: "2026-07-24T00:00:00+00:00",
@@ -38,7 +38,32 @@ class RefreshCoordinatorTests(unittest.TestCase):
         self.assertEqual(snapshot["comparisons"][0]["total_oi_usd"], 120)
         self.assertEqual(snapshot["sources"]["OKX"]["status"], "error")
         self.assertIn("source down", snapshot["sources"]["OKX"]["message"])
+        self.assertEqual(
+            snapshot["sources"]["CoinMarketCap"]["updated_at"],
+            "2026-07-24T00:00:00+00:00",
+        )
         self.assertEqual(store.saved, [snapshot])
+
+    def test_marks_empty_cmc_market_caps_as_an_error(self) -> None:
+        coordinator = RefreshCoordinator(
+            universe_loader=lambda: {"ETH": BinanceInstrument("ETH", "ETHUSDT")},
+            venue_loaders={
+                "Binance": lambda assets: [
+                    ContractOpenInterest("Binance", "ETHUSDT", 120, "ETH")
+                ]
+            },
+            market_cap_loader=lambda assets: MarketCapLookup(
+                {}, ("ETH",), "2026-07-24T00:00:00+00:00"
+            ),
+            store=InMemoryStore(),
+            now=lambda: "2026-07-24T00:00:00+00:00",
+        )
+
+        snapshot = coordinator.refresh()
+
+        self.assertFalse(snapshot["complete"])
+        self.assertEqual(snapshot["sources"]["CoinMarketCap"]["status"], "error")
+        self.assertIn("no usable market caps", snapshot["sources"]["CoinMarketCap"]["message"])
 
 
 if __name__ == "__main__":

@@ -35,6 +35,8 @@ button:disabled { cursor: wait; opacity: .66; }
 .source-strip { align-items: center; min-height: 54px; margin-top: 10px; border: 1px solid #243140; border-radius: 6px; background: #101720; padding: 8px 14px; gap: 22px; }
 .source-strip strong { color: #ced8e5; font-size: 14px; white-space: nowrap; }
 .source-list { display: flex; align-items: center; flex: 1; flex-wrap: wrap; gap: 7px 18px; }
+.source-group { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 12px; }
+.source-category { color: #6fbfe9; font-size: 12px; font-weight: 750; letter-spacing: .04em; }
 .source { color: #aebaca; font-size: 13px; white-space: nowrap; }
 .source i { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: #627181; }
 .source-ok i { background: #50d66b; box-shadow: 0 0 8px rgb(80 214 107 / 35%); }

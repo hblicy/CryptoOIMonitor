@@ -1,6 +1,6 @@
 # 合约 OI / 市值监控
 
-汇总 Binance、OKX、Bybit、Bitget、Gate、KuCoin、MEXC、Hyperliquid、Aster 的永续合约 OI，并按 CoinMarketCap 市值计算 `OI / MC`。
+汇总 CEX（Binance、OKX、Bybit、Bitget、Gate、KuCoin、BingX、MEXC）与 DEX（Hyperliquid、Aster、Lighter）的永续合约 OI，并按 CoinMarketCap 市值计算 `OI / MC`。
 
 - 币种池：仅 Binance USDⓈ 永续合约，且 24 小时美元成交额不少于 **1,000 万 USD**。
 - 黄色重点关注：`OI > MC`。
@@ -24,9 +24,12 @@ python app.py --port 8766
 
 打开 <http://127.0.0.1:8766>。
 
-页面服务启动后立即刷新，之后默认每 120 秒刷新一次。Binance 和 Aster 需按交易对拉取 OI，首轮全量刷新通常需要约一分钟；页面会保留最近一次完整快照并显示其时间。
+页面服务启动后立即刷新，之后按固定 120 秒时间点刷新；若单轮耗时超过 120 秒，会在结束后立即补跑一轮，但不会并发重叠，随后从该轮完成时间重新计算 120 秒周期。Binance、BingX 和 Aster 需按交易对拉取 OI，首轮全量刷新通常需要约一分钟；BingX 单个请求超过 12 秒会将该数据源标记为异常并暂停提醒推送。页面会保留最近一次完整快照并显示其时间。
+`REFRESH_SECONDS`、`CMC_REFRESH_SECONDS`、`SNAPSHOT_RETENTION_DAYS` 和 `MIN_FREE_DISK_GB` 必须是大于 0 的整数；配置为 `0` 或负数时服务会拒绝启动。OI 按 `REFRESH_SECONDS`（默认 120 秒）刷新；CoinMarketCap 市值按 `CMC_REFRESH_SECONDS`（默认 600 秒）独立刷新。
 
-CoinMarketCap 的市值查询按每 100 个返回币种计 1 个 Call Credit；默认刷新频率下请确认套餐额度充足。
+同一进程会缓存已确认的 CoinMarketCap 币种 ID，后续市值刷新只请求报价，不会重复请求映射接口；未映射或符号歧义的币种每小时会重新尝试映射一次。实际请求市值时会在日志中记录。
+
+CoinMarketCap 健康状态会显示市值的实际更新时间；顶部时间仅表示 OI 快照更新时间。快照默认保留 `SNAPSHOT_RETENTION_DAYS=30` 天。若可用磁盘空间低于 `MIN_FREE_DISK_GB=2`，服务会清除历史快照、仅保留最新快照，并在空间足够时收缩数据库；空间仍不足会记录错误日志。
 
 ## Ubuntu VPS 启停
 
@@ -76,6 +79,7 @@ ENV_FILE=/etc/crypto-oi-monitor.env bash scripts/start.sh
 - 止损：入场参考价的 `2 × ATR(14)`；止盈条件为 RSI(14) 回到 50。
 - 杠杆参考：2-3 倍；信号不包含自动下单或仓位金额。
 - 同一币种在 RSI 回到 50 前不重复推送同方向信号。
+- 完整快照中不再可比较的币种会清除关注提醒和交易信号状态；下次重新纳入比较时会按新币种重新判断。
 
 ## 验证
 

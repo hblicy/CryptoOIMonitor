@@ -74,7 +74,15 @@ class RefreshCoordinator:
                     health[name] = SourceHealth.ok(len(value))
                 else:
                     market_cap_lookup = value
-                    health[name] = SourceHealth.ok(len(value.market_caps))
+                    if selected_assets and not value.market_caps:
+                        health[name] = SourceHealth.failed(
+                            "CoinMarketCap returned no usable market caps for "
+                            f"{len(selected_assets)} selected assets"
+                        )
+                    else:
+                        health[name] = SourceHealth.ok(
+                            len(value.market_caps), value.refreshed_at
+                        )
 
         if market_cap_lookup is None:
             market_cap_lookup = MarketCapLookup({}, tuple(sorted(selected_assets)))

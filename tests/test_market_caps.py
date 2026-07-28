@@ -4,6 +4,7 @@ from crypto_oi_monitor.http_client import DataSourceRequestError
 from crypto_oi_monitor.market_caps import (
     CMC_ID_MAP_URL,
     CMC_QUOTES_URL,
+    CachedMarketCapLoader,
     fetch_market_caps,
     parse_market_caps,
 )
@@ -75,6 +76,16 @@ class CoinMarketCapMarketCapTests(unittest.TestCase):
         self.assertEqual(result.market_caps, {})
         self.assertEqual(result.unmapped_assets, ("AAA",))
 
+    def test_leaves_non_positive_market_cap_unmapped(self) -> None:
+        result = parse_market_caps(
+            {"data": [{"id": 1, "symbol": "ZERO"}]},
+            {"data": [{"id": 1, "quote": {"USD": {"market_cap": 0}}}]},
+            {"ZERO"},
+        )
+
+        self.assertEqual(result.market_caps, {})
+        self.assertEqual(result.unmapped_assets, ("ZERO",))
+
     def test_fetches_mapping_then_quotes_by_cmc_id(self) -> None:
         class FakeClient:
             def __init__(self) -> None:
@@ -101,6 +112,92 @@ class CoinMarketCapMarketCapTests(unittest.TestCase):
                 (CMC_QUOTES_URL, {"id": "1027", "convert": "USD", "skip_invalid": "true"}),
             ],
         )
+
+    def test_maps_assets_when_given_an_empty_mapping_cache(self) -> None:
+        class FakeClient:
+            def get_json(self, url: str, params: dict[str, str]):
+                if url == CMC_ID_MAP_URL:
+                    return {"data": [{"id": 1027, "symbol": "ETH"}]}
+                return {
+                    "data": [
+                        {"id": 1027, "quote": {"USD": {"market_cap": 300}}}
+                    ]
+                }
+
+        mapping_cache: dict[str, str] = {}
+        result = fetch_market_caps(FakeClient(), {"ETH"}, mapping_cache)
+
+        self.assertEqual(mapping_cache, {"ETH": "1027"})
+        self.assertEqual(result.market_caps["ETH"].market_cap_usd, 300)
+
+    def test_caches_mappings_and_throttles_quote_refreshes(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, str]]] = []
+
+            def get_json(self, url: str, params: dict[str, str]):
+                self.calls.append((url, params))
+                if url == CMC_ID_MAP_URL:
+                    return {"data": [{"id": 1027, "symbol": "ETH"}]}
+                return {
+                    "data": [
+                        {"id": 1027, "quote": {"USD": {"market_cap": 300}}}
+                    ]
+                }
+
+        now = 0.0
+        client = FakeClient()
+        loader = CachedMarketCapLoader(
+            client, refresh_seconds=600, clock=lambda: now
+        )
+
+        loader({"ETH"})
+        now = 120.0
+        loader({"ETH"})
+        now = 600.0
+        refreshed = loader({"ETH"})
+
+        self.assertEqual(
+            [url for url, _ in client.calls],
+            [CMC_ID_MAP_URL, CMC_QUOTES_URL, CMC_QUOTES_URL],
+        )
+        self.assertIsNotNone(getattr(refreshed, "refreshed_at", None))
+
+    def test_retries_unmapped_assets_after_one_hour(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.map_calls = 0
+                self.quote_calls = 0
+
+            def get_json(self, url: str, params: dict[str, str]):
+                if url == CMC_ID_MAP_URL:
+                    self.map_calls += 1
+                    if self.map_calls == 1:
+                        return {"data": []}
+                    return {"data": [{"id": 1027, "symbol": "ETH"}]}
+                self.quote_calls += 1
+                return {
+                    "data": [
+                        {"id": 1027, "quote": {"USD": {"market_cap": 300}}}
+                    ]
+                }
+
+        now = 0.0
+        client = FakeClient()
+        loader = CachedMarketCapLoader(
+            client, refresh_seconds=600, clock=lambda: now
+        )
+
+        first = loader({"ETH"})
+        now = 600.0
+        loader({"ETH"})
+        now = 3600.0
+        retried = loader({"ETH"})
+
+        self.assertEqual(first.unmapped_assets, ("ETH",))
+        self.assertEqual(client.map_calls, 2)
+        self.assertEqual(client.quote_calls, 1)
+        self.assertEqual(retried.market_caps["ETH"].market_cap_usd, 300)
 
     def test_skips_only_symbols_rejected_by_cmc_map(self) -> None:
         class FakeClient:

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
 
@@ -19,18 +20,21 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from crypto_oi_monitor.dispatch import dispatch_alerts
 from crypto_oi_monitor.http_client import HttpJsonClient
-from crypto_oi_monitor.market_caps import fetch_market_caps
+from crypto_oi_monitor.market_caps import CachedMarketCapLoader
 from crypto_oi_monitor.notifier import WeComNotifier
 from crypto_oi_monitor.refresh import RefreshCoordinator
 from crypto_oi_monitor.sources import (
+    BINGX_REQUEST_TIMEOUT_SECONDS,
     fetch_aster_open_interest,
     fetch_binance_open_interest,
     fetch_binance_universe,
+    fetch_bingx_open_interest,
     fetch_bitget_open_interest,
     fetch_bybit_open_interest,
     fetch_gate_open_interest,
     fetch_hyperliquid_open_interest,
     fetch_kucoin_open_interest,
+    fetch_lighter_open_interest,
     fetch_mexc_open_interest,
     fetch_okx_open_interest,
 )
@@ -42,9 +46,19 @@ LOGGER = logging.getLogger("crypto_oi_monitor")
 
 
 class MonitorApplication:
-    def __init__(self) -> None:
-        self.store = SnapshotStore(ROOT / "data" / "monitor.db")
+    def __init__(
+        self,
+        cmc_refresh_seconds: int = 600,
+        snapshot_retention_days: int = 30,
+        min_free_disk_bytes: int = 2 * 1024**3,
+    ) -> None:
+        self.store = SnapshotStore(
+            ROOT / "data" / "monitor.db",
+            snapshot_retention_days,
+            min_free_disk_bytes,
+        )
         public_client = HttpJsonClient()
+        bingx_client = HttpJsonClient(timeout_seconds=BINGX_REQUEST_TIMEOUT_SECONDS)
         cmc_api_key = os.environ["COINMARKETCAP_API_KEY"]
         cmc_client = HttpJsonClient({"X-CMC_PRO_API_KEY": cmc_api_key})
         self.coordinator = RefreshCoordinator(
@@ -52,6 +66,9 @@ class MonitorApplication:
             venue_loaders={
                 "Binance": lambda universe: fetch_binance_open_interest(
                     public_client, universe
+                ),
+                "BingX": lambda universe: fetch_bingx_open_interest(
+                    bingx_client, set(universe)
                 ),
                 "OKX": lambda universe: fetch_okx_open_interest(
                     public_client, set(universe)
@@ -77,8 +94,11 @@ class MonitorApplication:
                 "Aster": lambda universe: fetch_aster_open_interest(
                     public_client, set(universe)
                 ),
+                "Lighter": lambda universe: fetch_lighter_open_interest(
+                    public_client, set(universe)
+                ),
             },
-            market_cap_loader=lambda assets: fetch_market_caps(cmc_client, assets),
+            market_cap_loader=CachedMarketCapLoader(cmc_client, cmc_refresh_seconds),
             store=self.store,
             now=lambda: datetime.now(timezone.utc).isoformat(),
             persist=False,
@@ -96,6 +116,19 @@ class MonitorApplication:
     def refresh(self) -> dict[str, Any]:
         with self._lock:
             snapshot = self.coordinator.refresh()
+            if snapshot["complete"]:
+                removed_alerts, removed_trade_signals = self.store.clear_states_outside(
+                    {
+                        comparison["canonical_symbol"]
+                        for comparison in snapshot["comparisons"]
+                    }
+                )
+                if removed_alerts or removed_trade_signals:
+                    LOGGER.info(
+                        "清除不在当前比较范围内的状态：%s 个关注提醒，%s 个交易信号",
+                        removed_alerts,
+                        removed_trade_signals,
+                    )
             if self.notifier is None:
                 snapshot["notification"] = {
                     "status": "not_configured",
@@ -238,16 +271,34 @@ class MonitorHandler(BaseHTTPRequestHandler):
         LOGGER.info("%s - %s", self.address_string(), format % args)
 
 
+def next_refresh_schedule(
+    previous_deadline: float, finished_at: float, interval_seconds: int
+) -> tuple[float, float]:
+    next_deadline = max(previous_deadline + interval_seconds, finished_at)
+    return next_deadline, max(0.0, next_deadline - finished_at)
+
+
+def positive_refresh_seconds(value: str) -> int:
+    seconds = int(value)
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError("refresh seconds must be greater than zero")
+    return seconds
+
+
 def start_refresh_loop(application: MonitorApplication, interval_seconds: int) -> threading.Event:
     stopped = threading.Event()
 
     def run() -> None:
+        next_deadline = monotonic()
         while not stopped.is_set():
             try:
                 application.refresh()
             except Exception:
                 LOGGER.exception("定时刷新发生未处理异常")
-            stopped.wait(interval_seconds)
+            next_deadline, wait_seconds = next_refresh_schedule(
+                next_deadline, monotonic(), interval_seconds
+            )
+            stopped.wait(wait_seconds)
 
     threading.Thread(target=run, name="market-data-refresh", daemon=True).start()
     return stopped
@@ -258,11 +309,32 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument(
-        "--refresh-seconds", type=int, default=int(os.environ.get("REFRESH_SECONDS", "120"))
+        "--refresh-seconds",
+        type=positive_refresh_seconds,
+        default=os.environ.get("REFRESH_SECONDS", "120"),
+    )
+    parser.add_argument(
+        "--cmc-refresh-seconds",
+        type=positive_refresh_seconds,
+        default=os.environ.get("CMC_REFRESH_SECONDS", "600"),
+    )
+    parser.add_argument(
+        "--snapshot-retention-days",
+        type=positive_refresh_seconds,
+        default=os.environ.get("SNAPSHOT_RETENTION_DAYS", "30"),
+    )
+    parser.add_argument(
+        "--min-free-disk-gb",
+        type=positive_refresh_seconds,
+        default=os.environ.get("MIN_FREE_DISK_GB", "2"),
     )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    application = MonitorApplication()
+    application = MonitorApplication(
+        args.cmc_refresh_seconds,
+        args.snapshot_retention_days,
+        int(args.min_free_disk_gb * 1024**3),
+    )
     stopped = start_refresh_loop(application, args.refresh_seconds)
     handler = type(
         "ConfiguredMonitorHandler",

@@ -239,6 +239,37 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.failures[0].canonical_symbol, "NEW")
         self.assertIn("Binance request timed out", result.failures[0].message)
 
+    def test_records_malformed_binance_kline_and_continues_with_other_symbols(self) -> None:
+        store = MemoryStore()
+        notifier = RecordingNotifier()
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "BAD",
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "BADUSDT"}],
+                },
+                {
+                    "canonical_symbol": "PEPE",
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                },
+            ],
+        }
+
+        def load(symbol: str):
+            if symbol == "BADUSDT":
+                raise ValueError("malformed Binance kline")
+            return _long_setup_candles()
+
+        result = dispatch_trade_signals(snapshot, load, store, notifier)
+
+        self.assertEqual(result.events, ("long",))
+        self.assertEqual(notifier.signals, [("long", "PEPE")])
+        self.assertEqual(result.failures[0].canonical_symbol, "BAD")
+        self.assertIn("malformed Binance kline", result.failures[0].message)
+
 
 if __name__ == "__main__":
     unittest.main()

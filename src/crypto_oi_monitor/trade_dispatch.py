@@ -4,7 +4,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
-from .http_client import DataSourceRequestError
 from .trading import (
     EMA_PERIOD,
     LONG,
@@ -78,7 +77,7 @@ def dispatch_trade_signals(
                 canonical_symbol = comparison["canonical_symbol"]
                 try:
                     candles = future.result()
-                except DataSourceRequestError as error:
+                except Exception as error:
                     failures.append(
                         TradeSignalDispatchFailure(
                             canonical_symbol,

@@ -2,7 +2,26 @@ import { useEffect, useMemo, useState } from "react";
 
 import { formatRatio, formatShanghaiTime, formatUsd, riskLabel } from "./format";
 
-const VENUES = ["Binance", "OKX", "Bybit", "Bitget", "Gate", "KuCoin", "MEXC", "Hyperliquid", "Aster"];
+export const SOURCE_GROUPS = [
+  {
+    label: "CEX",
+    sources: ["Binance", "OKX", "Bybit", "Bitget", "Gate", "KuCoin", "BingX", "MEXC"],
+  },
+  { label: "DEX", sources: ["Hyperliquid", "Aster", "Lighter"] },
+  { label: "MC", sources: ["CoinMarketCap"] },
+];
+
+export const TRADE_VENUES = SOURCE_GROUPS
+  .filter((group) => group.label !== "MC")
+  .flatMap((group) => group.sources);
+
+export function sourceHealthSummary(sources) {
+  const sourceNames = SOURCE_GROUPS.flatMap((group) => group.sources);
+  return {
+    healthy: sourceNames.filter((name) => sources?.[name]?.status === "ok").length,
+    total: sourceNames.length,
+  };
+}
 
 function sourceStatus(source) {
   if (!source) return "未返回";
@@ -61,9 +80,7 @@ function App() {
 
   const comparisons = summary?.comparisons ?? [];
   const ambushCandidateCount = comparisons.filter((item) => item.status === "high_risk").length;
-  const healthySources = Object.values(summary?.sources ?? {}).filter(
-    (source) => source.status === "ok",
-  ).length;
+  const { healthy: healthySources, total: totalSources } = sourceHealthSummary(summary?.sources);
   const selected = comparisons.find((item) => item.canonical_symbol === selectedSymbol) ?? comparisons[0];
   const rows = useMemo(
     () =>
@@ -85,7 +102,7 @@ function App() {
       <header className="topbar">
         <div className="product-name">合约 OI / 市值监控 <span aria-label="指标说明" className="info-mark">i</span></div>
         <div className="topbar-actions">
-          <span>数据最新时间：{formatShanghaiTime(summary?.captured_at)}（UTC+8）</span>
+          <span>OI 最新时间：{formatShanghaiTime(summary?.captured_at)}（UTC+8）</span>
           <button className="refresh-button" type="button" onClick={refresh} disabled={refreshing}>
             <span aria-hidden="true">↻</span> {refreshing ? "刷新中" : "刷新数据"}
           </button>
@@ -97,14 +114,21 @@ function App() {
       <section className="summary-strip" aria-label="监控概要">
         <Metric label="跟踪资产数量" value={summary?.selected_asset_count ?? 0} />
         <Metric label="当前埋伏候选" value={ambushCandidateCount} tone={ambushCandidateCount ? "amber" : "default"} />
-        <Metric label="数据源健康状态" value={`${healthySources} / ${Object.keys(summary?.sources ?? {}).length}`} tone={summary?.complete ? "green" : "red"} />
-        <Metric label="上次全量更新时间" value={formatShanghaiTime(summary?.captured_at)} wide />
+        <Metric label="数据源健康状态" value={`${healthySources} / ${totalSources}`} tone={summary?.complete ? "green" : "red"} />
+        <Metric label="上次 OI 更新时间" value={formatShanghaiTime(summary?.captured_at)} wide />
       </section>
 
       <section className="source-strip" aria-label="数据源健康状态">
         <strong>数据源健康状态</strong>
         <div className="source-list">
-          {VENUES.map((venue) => <Source key={venue} name={venue} source={summary?.sources?.[venue]} />)}
+          {SOURCE_GROUPS.map((group) => (
+            <div className="source-group" key={group.label}>
+              <span className="source-category">{group.label}</span>
+              {group.sources.map((source) => (
+                <Source key={source} name={source} source={summary?.sources?.[source]} />
+              ))}
+            </div>
+          ))}
         </div>
         <span className={`snapshot-state ${summary?.complete ? "snapshot-ok" : "snapshot-error"}`}>
           {summary?.complete ? "所有数据源完整" : "数据源不完整，已暂停关注提醒推送"}
@@ -138,7 +162,7 @@ function App() {
             <table>
               <thead>
                 <tr>
-                  <th>#</th><th>资产</th><th>市值（MC）</th><th>聚合 OI（USD）</th><th>OI / 市值</th><th>关注状态</th><th>9 交易所 OI 覆盖度</th><th>操作</th>
+                  <th>#</th><th>资产</th><th>市值（MC）</th><th>聚合 OI（USD）</th><th>OI / 市值</th><th>关注状态</th><th>{TRADE_VENUES.length} 交易所 OI 覆盖度</th><th>操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -177,11 +201,12 @@ function Metric({ label, value, tone = "default", wide = false }) {
 
 function Source({ name, source }) {
   const healthy = source?.status === "ok";
-  return <span className={`source ${healthy ? "source-ok" : "source-error"}`}><i />{name} {sourceStatus(source)}</span>;
+  const updatedAt = name === "CoinMarketCap" ? source?.updated_at : null;
+  return <span className={`source ${healthy ? "source-ok" : "source-error"}`}><i />{name} {sourceStatus(source)}{updatedAt ? `（市值更新：${formatShanghaiTime(updatedAt)}）` : ""}</span>;
 }
 
 function Coverage({ venues }) {
-  const coverage = (venues.length / VENUES.length) * 100;
+  const coverage = (venues.length / TRADE_VENUES.length) * 100;
   return <span className="coverage"><span>{coverage.toFixed(1)}%</span><i><b style={{ width: `${coverage}%` }} /></i></span>;
 }
 

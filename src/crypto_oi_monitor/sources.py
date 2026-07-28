@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from time import sleep
 from typing import Any, Protocol
 
 from .domain import ContractOpenInterest, is_binance_universe_member
@@ -35,11 +36,18 @@ BITGET_CONTRACTS_URL = "https://api.bitget.com/api/v2/mix/market/contracts"
 GATE_TICKERS_URL = "https://api.gateio.ws/api/v4/futures/usdt/tickers"
 GATE_CONTRACTS_URL = "https://api.gateio.ws/api/v4/futures/usdt/contracts"
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
+LIGHTER_ORDER_BOOK_DETAILS_URL = "https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails"
 
 ASTER_EXCHANGE_INFO_URL = "https://fapi.asterdex.com/fapi/v1/exchangeInfo"
 ASTER_MARK_PRICE_URL = "https://fapi.asterdex.com/fapi/v1/premiumIndex"
 ASTER_OPEN_INTEREST_URL = "https://fapi.asterdex.com/fapi/v1/openInterest"
+BINGX_CONTRACTS_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
+BINGX_OPEN_INTEREST_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/openInterest"
 MAX_OI_WORKERS = 50
+BINGX_OI_BATCH_SIZE = 20
+BINGX_REQUEST_TIMEOUT_SECONDS = 12
+MAX_BINGX_OI_WORKERS = BINGX_OI_BATCH_SIZE
+BINGX_OI_BATCH_INTERVAL_SECONDS = 2
 
 
 def canonical_symbol(raw_symbol: str) -> str:
@@ -92,6 +100,32 @@ def parse_aster_open_interest(
     mark_prices: dict[str, str],
 ) -> ContractOpenInterest:
     return _base_oi_with_mark_price("Aster", canonical, symbol, open_interest, mark_prices)
+
+
+def parse_bingx_open_interest(
+    contracts_payload: dict[str, Any],
+    open_interest_by_symbol: dict[str, dict[str, Any]],
+    selected_assets: set[str],
+) -> list[ContractOpenInterest]:
+    result: list[ContractOpenInterest] = []
+    for contract in contracts_payload["data"]:
+        if contract["currency"] != "USDT" or contract["status"] != 1:
+            continue
+        canonical = canonical_symbol(contract["asset"])
+        if canonical not in selected_assets:
+            continue
+        open_interest = open_interest_by_symbol.get(contract["symbol"])
+        if open_interest is None:
+            continue
+        result.append(
+            ContractOpenInterest(
+                "BingX",
+                contract["symbol"],
+                float(open_interest["openInterest"]),
+                canonical,
+            )
+        )
+    return result
 
 
 def _base_oi_with_mark_price(
@@ -270,6 +304,27 @@ def parse_hyperliquid_open_interest(
     return result
 
 
+def parse_lighter_open_interest(
+    payload: dict[str, Any], selected_assets: set[str]
+) -> list[ContractOpenInterest]:
+    result: list[ContractOpenInterest] = []
+    for market in payload["order_book_details"]:
+        if market["market_type"] != "perp" or market["status"] != "active":
+            continue
+        canonical = canonical_symbol(market["symbol"])
+        if canonical not in selected_assets:
+            continue
+        result.append(
+            ContractOpenInterest(
+                "Lighter",
+                market["symbol"],
+                float(market["open_interest"]) * float(market["mark_price"]),
+                canonical,
+            )
+        )
+    return result
+
+
 def fetch_binance_universe(client: PublicHttpClient) -> dict[str, BinanceInstrument]:
     return parse_binance_universe(
         client.get_json(BINANCE_EXCHANGE_INFO_URL),
@@ -290,6 +345,37 @@ def fetch_binance_open_interest(
         BINANCE_OPEN_INTEREST_URL,
         mark_prices,
         parse_binance_open_interest,
+    )
+
+
+def fetch_bingx_open_interest(
+    client: PublicHttpClient, selected_assets: set[str]
+) -> list[ContractOpenInterest]:
+    contracts_payload = client.get_json(BINGX_CONTRACTS_URL)
+    symbols = [
+        contract["symbol"]
+        for contract in contracts_payload["data"]
+        if contract["currency"] == "USDT"
+        and contract["status"] == 1
+        and canonical_symbol(contract["asset"]) in selected_assets
+    ]
+    open_interest_by_symbol: dict[str, dict[str, Any]] = {}
+    for start in range(0, len(symbols), BINGX_OI_BATCH_SIZE):
+        batch = symbols[start : start + BINGX_OI_BATCH_SIZE]
+        with ThreadPoolExecutor(max_workers=MAX_BINGX_OI_WORKERS) as executor:
+            responses = executor.map(
+                lambda symbol: client.get_json(
+                    BINGX_OPEN_INTEREST_URL, {"symbol": symbol}
+                ),
+                batch,
+            )
+            for response in responses:
+                open_interest = response["data"]
+                open_interest_by_symbol[open_interest["symbol"]] = open_interest
+        if start + BINGX_OI_BATCH_SIZE < len(symbols):
+            sleep(BINGX_OI_BATCH_INTERVAL_SECONDS)
+    return parse_bingx_open_interest(
+        contracts_payload, open_interest_by_symbol, selected_assets
     )
 
 
@@ -353,6 +439,14 @@ def fetch_hyperliquid_open_interest(
     return parse_hyperliquid_open_interest(
         client.post_json(HYPERLIQUID_INFO_URL, {"type": "metaAndAssetCtxs"}),
         selected_assets,
+    )
+
+
+def fetch_lighter_open_interest(
+    client: PublicHttpClient, selected_assets: set[str]
+) -> list[ContractOpenInterest]:
+    return parse_lighter_open_interest(
+        client.get_json(LIGHTER_ORDER_BOOK_DETAILS_URL), selected_assets
     )
 
 
