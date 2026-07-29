@@ -76,6 +76,37 @@ class CoinMarketCapMarketCapTests(unittest.TestCase):
         self.assertEqual(result.market_caps, {})
         self.assertEqual(result.unmapped_assets, ("AAA",))
 
+    def test_uses_the_only_active_cmc_entry_for_a_duplicate_symbol(self) -> None:
+        result = parse_market_caps(
+            {
+                "data": [
+                    {"id": 1, "symbol": "BTC", "is_active": 0},
+                    {"id": 2, "symbol": "BTC", "is_active": 1},
+                ]
+            },
+            {"data": [{"id": 2, "quote": {"USD": {"market_cap": 1_000}}}]},
+            {"BTC"},
+        )
+
+        self.assertEqual(result.market_caps["BTC"].market_cap_id, "2")
+        self.assertEqual(result.unmapped_assets, ())
+
+    def test_logs_ambiguous_active_cmc_entries(self) -> None:
+        with self.assertLogs("crypto_oi_monitor.market_caps", "WARNING") as logs:
+            result = parse_market_caps(
+                {
+                    "data": [
+                        {"id": 1, "symbol": "AAA", "is_active": 1},
+                        {"id": 2, "symbol": "AAA", "is_active": 1},
+                    ]
+                },
+                {"data": []},
+                {"AAA"},
+            )
+
+        self.assertEqual(result.unmapped_assets, ("AAA",))
+        self.assertIn("AAA has 2 active CoinMarketCap candidates", logs.output[0])
+
     def test_leaves_non_positive_market_cap_unmapped(self) -> None:
         result = parse_market_caps(
             {"data": [{"id": 1, "symbol": "ZERO"}]},

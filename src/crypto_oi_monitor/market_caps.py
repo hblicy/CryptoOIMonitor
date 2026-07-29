@@ -155,10 +155,21 @@ def _mapped_ids(
     unmapped: list[str] = []
     for asset in sorted(selected_assets):
         matches = candidates[asset]
-        if len(matches) != 1:
+        active_matches = [
+            match for match in matches if match.get("is_active", 1) == 1
+        ]
+        if len(active_matches) != 1:
+            if matches:
+                LOGGER.warning(
+                    "CoinMarketCap mapping unresolved: %s has %s active "
+                    "CoinMarketCap candidates (%s total)",
+                    asset,
+                    len(active_matches),
+                    len(matches),
+                )
             unmapped.append(asset)
             continue
-        mapped_ids[asset] = str(matches[0]["id"])
+        mapped_ids[asset] = str(active_matches[0]["id"])
 
     return mapped_ids, unmapped
 
