@@ -105,6 +105,26 @@ class AppRefreshTests(unittest.TestCase):
 
         self.assertEqual(application.store.active_assets, set())
 
+    def test_keeps_states_for_cmc_unmapped_assets_in_a_complete_snapshot(self) -> None:
+        application = MonitorApplication.__new__(MonitorApplication)
+        application.coordinator = FakeCoordinator(
+            {
+                "complete": True,
+                "comparisons": [
+                    {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.0}
+                ],
+                "unmapped_assets": ["AAA"],
+            }
+        )
+        application.store = FakeStore()
+        application.notifier = None
+        application.trade_kline_loader = object()
+        application._lock = threading.Lock()
+
+        application.refresh()
+
+        self.assertEqual(application.store.active_assets, {"PEPE", "AAA"})
+
     def test_records_trade_signal_failures_without_breaking_snapshot_json(self) -> None:
         application = MonitorApplication.__new__(MonitorApplication)
         application.coordinator = FakeCoordinator()

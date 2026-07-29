@@ -247,9 +247,100 @@ class TradeDispatchTests(unittest.TestCase):
         )
 
         self.assertEqual(result.events, ("stop_long",))
-        self.assertEqual(result.details[0].reasons, ("rsi_above_50",))
+        self.assertEqual(
+            result.details[0].reasons,
+            ("oi_to_market_cap_not_above_100",),
+        )
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
         self.assertNotIn("PEPE", store.states)
+
+    def test_stops_active_long_when_oi_to_market_cap_is_100_percent(self) -> None:
+        store = MemoryStore()
+        store.states["PEPE"] = "long"
+        notifier = RecordingNotifier()
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "oi_to_market_cap": 1.0,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        result = dispatch_trade_signals(
+            snapshot, lambda _: _long_setup_candles(), store, notifier
+        )
+
+        self.assertEqual(result.events, ("stop_long",))
+        self.assertEqual(
+            result.details[0].reasons, ("oi_to_market_cap_not_above_100",)
+        )
+        self.assertEqual(notifier.stop_longs[0][0], "PEPE")
+        self.assertNotIn("PEPE", store.states)
+
+    def test_stops_active_long_for_oi_threshold_when_kline_load_fails(self) -> None:
+        store = MemoryStore()
+        store.states["PEPE"] = "long"
+        notifier = RecordingNotifier()
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "oi_to_market_cap": 0.99,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        result = dispatch_trade_signals(
+            snapshot,
+            lambda _: (_ for _ in ()).throw(DataSourceRequestError("Binance timed out")),
+            store,
+            notifier,
+        )
+
+        self.assertEqual(result.events, ("stop_long",))
+        self.assertEqual(result.failures, ())
+        self.assertEqual(
+            result.details[0].reasons, ("oi_to_market_cap_not_above_100",)
+        )
+        self.assertIsNone(result.details[0].candle_close_time)
+        self.assertEqual(notifier.stop_longs[0][0], "PEPE")
+        self.assertNotIn("PEPE", store.states)
+
+    def test_sends_oi_threshold_stop_before_loading_other_trade_candles(self) -> None:
+        store = MemoryStore()
+        store.states["PEPE"] = "long"
+        notifier = RecordingNotifier()
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "oi_to_market_cap": 1.0,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                },
+                {
+                    "canonical_symbol": "DOGE",
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "DOGEUSDT"}],
+                },
+            ],
+        }
+
+        def load(symbol: str):
+            self.assertEqual(notifier.stop_longs, [("PEPE", None, None, None)])
+            self.assertNotIn("PEPE", store.states)
+            self.assertEqual(symbol, "DOGEUSDT")
+            return _candles([100] * 1001)
+
+        result = dispatch_trade_signals(snapshot, load, store, notifier)
+
+        self.assertEqual(result.events, ("stop_long",))
+        self.assertEqual(result.failures, ())
 
     def test_does_not_stop_active_long_when_rsi_is_exactly_50(self) -> None:
         store = MemoryStore()

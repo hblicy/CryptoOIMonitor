@@ -36,6 +36,7 @@ describe("data source groups", () => {
   it("labels long and stop-long signal details for the dashboard", () => {
     expect(tradeSignalLabel("long")).toBe("开多");
     expect(tradeSignalLabel("stop_long")).toBe("停止开多");
+    expect(tradeSignalReason("oi_to_market_cap_not_above_100")).toBe("OI / 市值不高于 100%");
     expect(tradeSignalReason("rsi_above_50")).toBe("RSI(14) 超过 50");
     expect(tradeSignalReason("close_below_ema200")).toBe("15m 收盘价低于 EMA200");
   });

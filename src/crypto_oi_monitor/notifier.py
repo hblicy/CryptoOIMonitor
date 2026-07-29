@@ -37,7 +37,11 @@ class WeComNotifier:
             raise RuntimeError(f"WeCom webhook rejected message: {response}")
 
     def send_stop_long(
-        self, comparison: dict[str, Any], rsi: float, close: float, ema200: float
+        self,
+        comparison: dict[str, Any],
+        rsi: float | None,
+        close: float | None,
+        ema200: float | None,
     ) -> None:
         response = self.client.post_json(
             self.webhook_url,
@@ -77,7 +81,7 @@ def _trade_message(signal: TradeSetup, comparison: dict[str, Any]) -> str:
         f"周期：15m（已收盘）\n"
         f"参考入场：{signal.entry_price:.8f}\n"
         f"止损：{signal.stop_loss:.8f}（2 × ATR(14)）\n"
-        f"停止开多条件：RSI(14) 超过 50 或 15m 收盘价低于 EMA200\n"
+        f"停止开多条件：OI / 市值不高于 100%、RSI(14) 超过 50 或 15m 收盘价低于 EMA200\n"
         f"杠杆参考：2-3倍\n"
         f"RSI(14)：{signal.rsi:.2f}\n"
         f"EMA200：{signal.ema200:.8f}\n"
@@ -87,22 +91,36 @@ def _trade_message(signal: TradeSetup, comparison: dict[str, Any]) -> str:
 
 
 def _stop_long_message(
-    comparison: dict[str, Any], rsi: float, close: float, ema200: float
+    comparison: dict[str, Any],
+    rsi: float | None,
+    close: float | None,
+    ema200: float | None,
 ) -> str:
     reasons = []
-    if rsi > 50:
+    if comparison["oi_to_market_cap"] <= 1:
+        reasons.append("OI / 市值已不高于 100%")
+    if rsi is not None and rsi > 50:
         reasons.append("RSI(14) 已超过 50")
-    if close < ema200:
+    if close is not None and ema200 is not None and close < ema200:
         reasons.append("15m 收盘价已低于 EMA200")
     if not reasons:
         raise ValueError("Stop-long message requires a stop condition")
+    kline_metrics = ""
+    if rsi is not None and close is not None and ema200 is not None:
+        period = "周期：15m（已收盘）\n"
+        kline_metrics = (
+            f"RSI(14)：{rsi:.2f}\n"
+            f"收盘价：{close:.8f}\n"
+            f"EMA200：{ema200:.8f}\n"
+        )
+    else:
+        period = "周期：不适用（按 OI / 市值触发）\n"
+        kline_metrics = "15m K 线：本轮未获取，已按 OI / 市值条件停止开多。\n"
     return (
         "【交易信号：停止开多】\n"
         f"币种：{comparison['canonical_symbol']}\n"
-        "周期：15m（已收盘）\n"
-        f"RSI(14)：{rsi:.2f}\n"
-        f"收盘价：{close:.8f}\n"
-        f"EMA200：{ema200:.8f}\n"
+        f"{period}"
+        f"{kline_metrics}"
         f"原因：{'；'.join(reasons)}，请勿继续开多。\n"
         f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%"
     )

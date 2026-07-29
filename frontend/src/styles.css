@@ -118,6 +118,13 @@ tbody tr.selected-row td { background: #12263a; box-shadow: inset 0 1px #209ee3,
 .detail-total { justify-content: space-between; padding: 15px 22px; border-bottom: 1px solid #263442; color: #c8d5e3; } .detail-total strong { color: #eff6fd; }
 .detail-note { margin: 0; padding: 16px 22px; color: #8fa1b4; font-size: 12px; line-height: 1.7; }
 .system-note { margin-top: 11px; color: #899bad; font-size: 12px; }
+.cmc-candidate-panel { margin-top: 10px; border: 1px solid #33465a; border-radius: 5px; overflow: hidden; background: #111c27; }
+.cmc-candidate-panel > header { display: flex; align-items: baseline; gap: 12px; padding: 10px 13px; border-bottom: 1px solid #33465a; background: #14202c; }
+.cmc-candidate-panel > header strong { color: #f5b34c; font-size: 13px; }
+.cmc-candidate-panel > header span { color: #91a2b3; font-size: 12px; }
+.cmc-candidate-scroll { overflow-x: auto; }
+.cmc-candidate-panel table { min-width: 980px; }
+.cmc-candidate-panel code { color: #b9d9ff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .request-error { margin-top: 12px; border: 1px solid #74414a; background: #29171c; color: #ff9aa4; padding: 10px 13px; border-radius: 5px; font-size: 13px; }
 .loading-state { display: grid; min-height: 100vh; place-items: center; color: #cdd9e5; font-size: 16px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }

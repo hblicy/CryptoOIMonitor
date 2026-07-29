@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from crypto_oi_monitor.dispatch import dispatch_alerts
 from crypto_oi_monitor.http_client import HttpJsonClient
-from crypto_oi_monitor.market_caps import CachedMarketCapLoader
+from crypto_oi_monitor.market_caps import CachedMarketCapLoader, parse_cmc_id_overrides
 from crypto_oi_monitor.notifier import WeComNotifier
 from crypto_oi_monitor.refresh import RefreshCoordinator
 from crypto_oi_monitor.sources import (
@@ -84,6 +84,11 @@ class MonitorApplication:
         bingx_client = HttpJsonClient(timeout_seconds=BINGX_REQUEST_TIMEOUT_SECONDS)
         cmc_api_key = os.environ["COINMARKETCAP_API_KEY"]
         cmc_client = HttpJsonClient({"X-CMC_PRO_API_KEY": cmc_api_key})
+        market_cap_loader = CachedMarketCapLoader(
+            cmc_client,
+            cmc_refresh_seconds,
+            id_overrides=parse_cmc_id_overrides(os.environ.get("CMC_ID_OVERRIDES")),
+        )
         self.coordinator = RefreshCoordinator(
             universe_loader=lambda: fetch_binance_universe(public_client),
             venue_loaders={
@@ -121,7 +126,14 @@ class MonitorApplication:
                     public_client, set(universe)
                 ),
             },
-            market_cap_loader=CachedMarketCapLoader(cmc_client, cmc_refresh_seconds),
+            market_cap_loader=lambda universe: market_cap_loader(
+                set(universe),
+                {
+                    asset: instrument.last_price
+                    for asset, instrument in universe.items()
+                    if instrument.last_price is not None
+                },
+            ),
             store=self.store,
             now=lambda: datetime.now(timezone.utc).isoformat(),
             persist=False,
@@ -145,6 +157,7 @@ class MonitorApplication:
                         comparison["canonical_symbol"]
                         for comparison in snapshot["comparisons"]
                     }
+                    | set(snapshot.get("unmapped_assets", []))
                 )
                 if removed_alerts or removed_trade_signals:
                     LOGGER.info(

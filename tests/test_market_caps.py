@@ -6,6 +6,7 @@ from crypto_oi_monitor.market_caps import (
     CMC_QUOTES_URL,
     CachedMarketCapLoader,
     fetch_market_caps,
+    parse_cmc_id_overrides,
     parse_market_caps,
 )
 
@@ -256,6 +257,196 @@ class CoinMarketCapMarketCapTests(unittest.TestCase):
         self.assertEqual(client.map_calls, 2)
         self.assertEqual(client.quote_calls, 1)
         self.assertEqual(retried.market_caps["ETH"].market_cap_usd, 300)
+
+    def test_retries_mapping_after_a_cached_cmc_id_returns_no_market_cap(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.map_calls = 0
+
+            def get_json(self, url: str, params: dict[str, str]):
+                if url == CMC_ID_MAP_URL:
+                    self.map_calls += 1
+                    market_cap_id = 1 if self.map_calls == 1 else 2
+                    return {"data": [{"id": market_cap_id, "symbol": "ETH"}]}
+                if params["id"] == "1":
+                    return {"data": [{"id": 1, "quote": {"USD": {"market_cap": 0}}}]}
+                return {
+                    "data": [
+                        {"id": 2, "quote": {"USD": {"market_cap": 300}}}
+                    ]
+                }
+
+        now = 0.0
+        client = FakeClient()
+        loader = CachedMarketCapLoader(
+            client, refresh_seconds=600, clock=lambda: now
+        )
+
+        first = loader({"ETH"})
+        now = 3_600.0
+        retried = loader({"ETH"})
+
+        self.assertEqual(first.unmapped_assets, ("ETH",))
+        self.assertEqual(client.map_calls, 2)
+        self.assertEqual(retried.market_caps["ETH"].market_cap_id, "2")
+
+    def test_exposes_ambiguous_cmc_candidates_for_manual_mapping(self) -> None:
+        class FakeClient:
+            def get_json(self, url: str, params: dict[str, str]):
+                if url == CMC_ID_MAP_URL:
+                    return {
+                        "data": [
+                            {"id": 1, "symbol": "AAA", "name": "Alpha", "slug": "alpha"},
+                            {"id": 2, "symbol": "AAA", "name": "Another", "slug": "another"},
+                        ]
+                    }
+                return {
+                    "data": [
+                        {"id": 1, "quote": {"USD": {"price": 99, "market_cap": 1_000}}},
+                        {"id": 2, "quote": {"USD": {"price": 200, "market_cap": 2_000}}},
+                    ]
+                }
+
+        result = CachedMarketCapLoader(FakeClient(), refresh_seconds=600)(
+            {"AAA"}, {"AAA": 100}
+        )
+
+        self.assertEqual(
+            [
+                (
+                    candidate.asset,
+                    candidate.market_cap_id,
+                    candidate.name,
+                    candidate.slug,
+                    candidate.price_difference_percent,
+                )
+                for candidate in result.unmapped_candidates
+            ],
+            [
+                ("AAA", "1", "Alpha", "alpha", 1.0),
+                ("AAA", "2", "Another", "another", 100.0),
+            ],
+        )
+
+    def test_refreshes_cached_candidate_prices_with_each_cmc_refresh(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.quote_calls = 0
+
+            def get_json(self, url: str, params: dict[str, str]):
+                if url == CMC_ID_MAP_URL:
+                    return {
+                        "data": [
+                            {"id": 1, "symbol": "AAA", "name": "Alpha", "slug": "alpha"},
+                            {"id": 2, "symbol": "AAA", "name": "Another", "slug": "another"},
+                        ]
+                    }
+                self.quote_calls += 1
+                prices = (99, 200) if self.quote_calls == 1 else (150, 101)
+                return {
+                    "data": [
+                        {"id": 1, "quote": {"USD": {"price": prices[0], "market_cap": 1_000}}},
+                        {"id": 2, "quote": {"USD": {"price": prices[1], "market_cap": 2_000}}},
+                    ]
+                }
+
+        now = 0.0
+        loader = CachedMarketCapLoader(
+            FakeClient(), refresh_seconds=600, clock=lambda: now
+        )
+
+        loader({"AAA"}, {"AAA": 100})
+        now = 600.0
+        refreshed = loader({"AAA"}, {"AAA": 100})
+
+        self.assertEqual(
+            [candidate.market_cap_id for candidate in refreshed.unmapped_candidates],
+            ["2", "1"],
+        )
+        self.assertEqual(refreshed.unmapped_candidates[0].price_usd, 101)
+        self.assertEqual(refreshed.unmapped_candidates[0].price_difference_percent, 1)
+
+    def test_uses_configured_cmc_id_override_for_an_ambiguous_symbol(self) -> None:
+        class FakeClient:
+            def get_json(self, url: str, params: dict[str, str]):
+                if url == CMC_ID_MAP_URL:
+                    self.fail("Configured CMC ID must skip symbol mapping")
+                return {
+                    "data": [
+                        {
+                            "id": 1,
+                            "symbol": "AAA",
+                            "quote": {"USD": {"market_cap": 1_000}},
+                        }
+                    ]
+                }
+
+            def fail(self, message: str) -> None:
+                raise AssertionError(message)
+
+        result = fetch_market_caps(
+            FakeClient(), {"AAA"}, id_overrides={"AAA": "1"}
+        )
+
+        self.assertEqual(result.market_caps["AAA"].market_cap_id, "1")
+        self.assertEqual(result.unmapped_assets, ())
+
+    def test_logs_an_unusable_configured_cmc_id_override(self) -> None:
+        class FakeClient:
+            def get_json(self, url: str, params: dict[str, str]):
+                if url == CMC_ID_MAP_URL:
+                    raise AssertionError("Configured CMC ID must skip symbol mapping")
+                return {
+                    "data": [
+                        {
+                            "id": 1,
+                            "symbol": "AAA",
+                            "quote": {"USD": {"market_cap": 0}},
+                        }
+                    ]
+                }
+
+        with self.assertLogs("crypto_oi_monitor.market_caps", "WARNING") as logs:
+            result = fetch_market_caps(
+                FakeClient(), {"AAA"}, id_overrides={"AAA": "1"}
+            )
+
+        self.assertEqual(result.unmapped_assets, ("AAA",))
+        self.assertIn(
+            "CoinMarketCap configured ID override is unusable for AAA: 1",
+            logs.output[0],
+        )
+
+    def test_rejects_configured_override_for_a_different_cmc_symbol(self) -> None:
+        class FakeClient:
+            def get_json(self, url: str, params: dict[str, str]):
+                if url == CMC_ID_MAP_URL:
+                    raise AssertionError("Configured CMC ID must skip symbol mapping")
+                return {
+                    "data": [
+                        {
+                            "id": 1,
+                            "symbol": "WRONG",
+                            "quote": {"USD": {"market_cap": 1_000}},
+                        }
+                    ]
+                }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "CMC_ID_OVERRIDES AAA:1 returned WRONG, expected AAA",
+        ):
+            fetch_market_caps(FakeClient(), {"AAA"}, id_overrides={"AAA": "1"})
+
+    def test_parses_cmc_id_overrides(self) -> None:
+        self.assertEqual(
+            parse_cmc_id_overrides("btc:1, ETH:1027"),
+            {"BTC": "1", "ETH": "1027"},
+        )
+
+    def test_rejects_invalid_cmc_id_overrides(self) -> None:
+        with self.assertRaisesRegex(ValueError, "ASSET:CMC_ID"):
+            parse_cmc_id_overrides("BTC=1")
 
     def test_skips_only_symbols_rejected_by_cmc_map(self) -> None:
         class FakeClient:

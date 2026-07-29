@@ -12,6 +12,7 @@ from .domain import ContractOpenInterest, is_binance_universe_member
 class BinanceInstrument:
     canonical_symbol: str
     symbol: str
+    last_price: float | None = None
 
 
 class PublicHttpClient(Protocol):
@@ -63,22 +64,25 @@ def canonical_symbol(raw_symbol: str) -> str:
 def parse_binance_universe(
     exchange_info: dict[str, Any], tickers: list[dict[str, Any]]
 ) -> dict[str, BinanceInstrument]:
-    turnover_by_symbol = {
-        ticker["symbol"]: float(ticker["quoteVolume"]) for ticker in tickers
-    }
+    tickers_by_symbol = {ticker["symbol"]: ticker for ticker in tickers}
     universe: dict[str, BinanceInstrument] = {}
     for instrument in exchange_info["symbols"]:
         if instrument["quoteAsset"] != "USDT" or instrument["status"] != "TRADING":
             continue
-        turnover = turnover_by_symbol.get(instrument["symbol"])
-        if turnover is None or not is_binance_universe_member(
+        ticker = tickers_by_symbol.get(instrument["symbol"])
+        turnover = None if ticker is None else float(ticker["quoteVolume"])
+        if ticker is None or not is_binance_universe_member(
             instrument["contractType"], turnover
         ):
             continue
         canonical = canonical_symbol(instrument["baseAsset"])
         if canonical in universe:
             raise ValueError(f"Binance universe has duplicate canonical symbol: {canonical}")
-        universe[canonical] = BinanceInstrument(canonical, instrument["symbol"])
+        universe[canonical] = BinanceInstrument(
+            canonical,
+            instrument["symbol"],
+            float(ticker["lastPrice"]) if "lastPrice" in ticker else None,
+        )
     return universe
 
 

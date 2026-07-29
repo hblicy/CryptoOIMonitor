@@ -30,6 +30,7 @@ export function tradeSignalLabel(eventType) {
 }
 
 export function tradeSignalReason(reason) {
+  if (reason === "oi_to_market_cap_not_above_100") return "OI / 市值不高于 100%";
   if (reason === "rsi_above_50") return "RSI(14) 超过 50";
   if (reason === "close_below_ema200") return "15m 收盘价低于 EMA200";
   return reason;
@@ -214,7 +215,43 @@ function App() {
         {summary?.notification?.message || (summary?.notification?.status === "ok" ? "企业微信关注提醒状态正常。" : "企业微信状态待刷新。")}
         {summary?.unmapped_assets?.length ? ` CoinMarketCap 未映射：${summary.unmapped_assets.join("、")}` : ""}
       </footer>
+      <CmcCandidatePanel candidates={summary?.unmapped_candidates ?? []} />
     </main>
+  );
+}
+
+function CmcCandidatePanel({ candidates }) {
+  if (!candidates.length) return null;
+  return (
+    <section className="cmc-candidate-panel">
+      <header>
+        <strong>CoinMarketCap 待确认映射</strong>
+        <span>按与 Binance 价格的价差排序；确认后填入 .env 的 CMC_ID_OVERRIDES</span>
+      </header>
+      <div className="cmc-candidate-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>资产</th><th>Binance 价格</th><th>CMC 候选</th><th>CMC ID</th><th>CMC 价格</th><th>价差</th><th>市值</th><th>配置值</th>
+            </tr>
+          </thead>
+          <tbody>
+            {candidates.map((candidate) => (
+              <tr key={`${candidate.asset}-${candidate.market_cap_id}`}>
+                <td>{candidate.asset}</td>
+                <td>{formatTradePrice(candidate.binance_price_usd)}</td>
+                <td>{candidate.name}{candidate.slug ? ` (${candidate.slug})` : ""}</td>
+                <td>{candidate.market_cap_id}</td>
+                <td>{formatTradePrice(candidate.price_usd)}</td>
+                <td>{candidate.price_difference_percent == null ? "—" : `${candidate.price_difference_percent.toFixed(3)}%`}</td>
+                <td>{candidate.market_cap_usd == null ? "—" : formatUsd(candidate.market_cap_usd)}</td>
+                <td><code>{candidate.asset}:{candidate.market_cap_id}</code></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 

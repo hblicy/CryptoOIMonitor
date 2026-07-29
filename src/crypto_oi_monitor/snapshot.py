@@ -84,6 +84,9 @@ def build_snapshot(
         "selected_asset_count": len(selected_assets),
         "comparisons": comparisons,
         "unmapped_assets": list(market_cap_lookup.unmapped_assets),
+        "unmapped_candidates": [
+            candidate.as_dict() for candidate in market_cap_lookup.unmapped_candidates
+        ],
         "sources": {name: state.as_dict() for name, state in health.items()},
     }
 

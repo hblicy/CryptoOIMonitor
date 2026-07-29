@@ -32,10 +32,10 @@ class TradeSignalDispatchFailure:
 class TradeSignalEvent:
     event_type: str
     canonical_symbol: str
-    candle_close_time: int
-    rsi: float
-    close: float
-    ema200: float
+    candle_close_time: int | None
+    rsi: float | None
+    close: float | None
+    ema200: float | None
     oi_to_market_cap: float
     entry_price: float | None = None
     stop_loss: float | None = None
@@ -112,7 +112,11 @@ class TradeSignalNotifier(Protocol):
     ) -> None: ...
 
     def send_stop_long(
-        self, comparison: dict[str, Any], rsi: float, close: float, ema200: float
+        self,
+        comparison: dict[str, Any],
+        rsi: float | None,
+        close: float | None,
+        ema200: float | None,
     ) -> None: ...
 
 
@@ -126,21 +130,43 @@ def dispatch_trade_signals(
         return TradeSignalDispatchResult((), ())
 
     candidates = []
+    oi_threshold_stops = []
     for comparison in snapshot["comparisons"]:
         state = store.get_trade_signal_state(comparison["canonical_symbol"])
         if state == LEGACY_SHORT_STATE:
             store.clear_trade_signal_state(comparison["canonical_symbol"])
             state = None
-        if comparison["oi_to_market_cap"] > 1 or state == LONG:
+        if state == LONG and comparison["oi_to_market_cap"] <= 1:
+            oi_threshold_stops.append((comparison, state))
+        elif comparison["oi_to_market_cap"] > 1 or state == LONG:
             candidates.append((comparison, state))
 
+    dispatched: list[str] = []
+    details: list[TradeSignalEvent] = []
+    for comparison, state in oi_threshold_stops:
+        canonical_symbol = comparison["canonical_symbol"]
+        reasons = _stop_long_reasons(
+            state, comparison["oi_to_market_cap"], None, None, None
+        )
+        notifier.send_stop_long(comparison, None, None, None)
+        store.clear_trade_signal_state(canonical_symbol)
+        dispatched.append(STOP_LONG)
+        details.append(
+            TradeSignalEvent(
+                event_type=STOP_LONG,
+                canonical_symbol=canonical_symbol,
+                candle_close_time=None,
+                rsi=None,
+                close=None,
+                ema200=None,
+                oi_to_market_cap=comparison["oi_to_market_cap"],
+                reasons=reasons,
+            )
+        )
     candidate_comparisons = [comparison for comparison, _state in candidates]
     candles_by_symbol, failures, failures_by_symbol = _load_trade_candles(
         candidate_comparisons, kline_loader
     )
-
-    dispatched: list[str] = []
-    details: list[TradeSignalEvent] = []
     scans = _build_trade_condition_scans(
         candidate_comparisons, candles_by_symbol, failures_by_symbol
     )
@@ -153,7 +179,9 @@ def dispatch_trade_signals(
             rsi = current_rsi(candles)
             close = candles[-1].close
             ema200 = current_ema200(candles)
-            reasons = _stop_long_reasons(state, rsi, close, ema200)
+            reasons = _stop_long_reasons(
+                state, comparison["oi_to_market_cap"], rsi, close, ema200
+            )
             if reasons:
                 notifier.send_stop_long(comparison, rsi, close, ema200)
                 store.clear_trade_signal_state(canonical_symbol)
@@ -303,13 +331,19 @@ def _binance_symbol(comparison: dict[str, Any]) -> str:
 
 
 def _stop_long_reasons(
-    side: str, rsi: float, close: float, ema200: float
+    side: str,
+    oi_to_market_cap: float,
+    rsi: float | None,
+    close: float | None,
+    ema200: float | None,
 ) -> tuple[str, ...]:
     if side == LONG:
         reasons = []
-        if rsi > 50:
+        if oi_to_market_cap <= 1:
+            reasons.append("oi_to_market_cap_not_above_100")
+        if rsi is not None and rsi > 50:
             reasons.append("rsi_above_50")
-        if close < ema200:
+        if close is not None and ema200 is not None and close < ema200:
             reasons.append("close_below_ema200")
         return tuple(reasons)
     raise ValueError(f"Unsupported trade signal side: {side}")

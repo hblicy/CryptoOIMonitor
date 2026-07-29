@@ -1,7 +1,7 @@
 import unittest
 
 from crypto_oi_monitor.domain import ContractOpenInterest
-from crypto_oi_monitor.market_caps import MarketCap, MarketCapLookup
+from crypto_oi_monitor.market_caps import MarketCap, MarketCapCandidate, MarketCapLookup
 from crypto_oi_monitor.snapshot import SourceHealth, build_snapshot
 
 
@@ -62,6 +62,39 @@ class SnapshotTests(unittest.TestCase):
         )
 
         self.assertEqual(snapshot["comparisons"][0]["total_oi_usd"], 120)
+
+    def test_exposes_unmapped_cmc_candidates(self) -> None:
+        snapshot = build_snapshot(
+            captured_at="2026-07-24T00:00:00+00:00",
+            selected_assets={"AAA"},
+            market_cap_lookup=MarketCapLookup(
+                {},
+                ("AAA",),
+                unmapped_candidates=(
+                    MarketCapCandidate(
+                        "AAA", "1", "Alpha", "alpha", 99, 1_000, 100, 1
+                    ),
+                ),
+            ),
+            contracts_by_venue={"Binance": []},
+            health={"Binance": SourceHealth.ok(0), "CoinMarketCap": SourceHealth.ok(0)},
+        )
+
+        self.assertEqual(
+            snapshot["unmapped_candidates"],
+            [
+                {
+                    "asset": "AAA",
+                    "market_cap_id": "1",
+                    "name": "Alpha",
+                    "slug": "alpha",
+                    "price_usd": 99,
+                    "market_cap_usd": 1_000,
+                    "binance_price_usd": 100,
+                    "price_difference_percent": 1,
+                }
+            ],
+        )
 
 
 if __name__ == "__main__":

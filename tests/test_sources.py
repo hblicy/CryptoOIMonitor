@@ -52,7 +52,7 @@ class BinanceParserTests(unittest.TestCase):
                 ]
             },
             [
-                {"symbol": "ETHUSDT", "quoteVolume": "10000000"},
+                {"symbol": "ETHUSDT", "quoteVolume": "10000000", "lastPrice": "3000"},
                 {"symbol": "LOWUSDT", "quoteVolume": "9999999.99"},
                 {"symbol": "BTCUSDT_260925", "quoteVolume": "999999999"},
             ],
@@ -60,6 +60,7 @@ class BinanceParserTests(unittest.TestCase):
 
         self.assertEqual(tuple(universe), ("ETH",))
         self.assertEqual(universe["ETH"].symbol, "ETHUSDT")
+        self.assertEqual(universe["ETH"].last_price, 3_000)
 
     def test_converts_binance_base_oi_with_mark_price(self) -> None:
         oi = parse_binance_open_interest(
