@@ -39,10 +39,33 @@ from crypto_oi_monitor.sources import (
     fetch_okx_open_interest,
 )
 from crypto_oi_monitor.storage import SnapshotStore
-from crypto_oi_monitor.trade_dispatch import dispatch_trade_signals
+from crypto_oi_monitor.trade_dispatch import (
+    TradeConditionScanResult,
+    dispatch_trade_signals,
+    scan_trade_conditions,
+)
 from crypto_oi_monitor.trading import fetch_binance_closed_candles
 
 LOGGER = logging.getLogger("crypto_oi_monitor")
+
+
+def _condition_scan_payload(result: TradeConditionScanResult) -> dict[str, Any]:
+    for failure in result.failures:
+        LOGGER.warning(
+            "交易条件扫描已跳过 %s：%s",
+            failure.canonical_symbol,
+            failure.message,
+        )
+    return {
+        "trade_condition_scans": [scan.as_dict() for scan in result.scans],
+        "trade_condition_scan_failures": [
+            {
+                "canonical_symbol": failure.canonical_symbol,
+                "message": failure.message,
+            }
+            for failure in result.failures
+        ],
+    }
 
 
 class MonitorApplication:
@@ -133,6 +156,9 @@ class MonitorApplication:
                 snapshot["notification"] = {
                     "status": "not_configured",
                     "message": "WECOM_ROBOT_WEBHOOK_URL 未配置，企业微信关注提醒未启用。",
+                    **_condition_scan_payload(
+                        scan_trade_conditions(snapshot, self.trade_kline_loader)
+                    ),
                 }
             elif not snapshot["complete"]:
                 snapshot["notification"] = {
@@ -147,6 +173,9 @@ class MonitorApplication:
                     snapshot["notification"] = {
                         "status": "error",
                         "message": f"{type(error).__name__}: {error}",
+                        **_condition_scan_payload(
+                            scan_trade_conditions(snapshot, self.trade_kline_loader)
+                        ),
                     }
                 else:
                     try:
@@ -163,6 +192,9 @@ class MonitorApplication:
                             "events": events,
                             "trade_signal_status": "error",
                             "message": f"交易信号失败：{type(error).__name__}: {error}",
+                            **_condition_scan_payload(
+                                scan_trade_conditions(snapshot, self.trade_kline_loader)
+                            ),
                         }
                     else:
                         if trade_result.failures:
@@ -179,6 +211,9 @@ class MonitorApplication:
                                 "trade_signal_details": [
                                     detail.as_dict()
                                     for detail in trade_result.details
+                                ],
+                                "trade_condition_scans": [
+                                    scan.as_dict() for scan in trade_result.scans
                                 ],
                                 "trade_signal_failures": [
                                     {
@@ -201,6 +236,9 @@ class MonitorApplication:
                                 "trade_signal_details": [
                                     detail.as_dict()
                                     for detail in trade_result.details
+                                ],
+                                "trade_condition_scans": [
+                                    scan.as_dict() for scan in trade_result.scans
                                 ],
                             }
             self.store.save_snapshot(snapshot)

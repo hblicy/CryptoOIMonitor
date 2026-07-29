@@ -35,6 +35,14 @@ export function tradeSignalReason(reason) {
   return reason;
 }
 
+export function groupTradeConditionScans(scans) {
+  return {
+    canLong: scans.filter((scan) => scan.status === "can_long"),
+    stopLong: scans.filter((scan) => scan.status === "stop_long"),
+    errors: scans.filter((scan) => scan.status === "kline_error"),
+  };
+}
+
 function sourceStatus(source) {
   if (!source) return "未返回";
   return source.status === "ok" ? "正常" : "异常";
@@ -91,7 +99,7 @@ function App() {
   }, []);
 
   const comparisons = summary?.comparisons ?? [];
-  const tradeSignalDetails = summary?.notification?.trade_signal_details ?? [];
+  const tradeConditionScans = summary?.notification?.trade_condition_scans ?? [];
   const ambushCandidateCount = comparisons.filter((item) => item.status === "high_risk").length;
   const { healthy: healthySources, total: totalSources } = sourceHealthSummary(summary?.sources);
   const selected = comparisons.find((item) => item.canonical_symbol === selectedSymbol) ?? comparisons[0];
@@ -148,7 +156,7 @@ function App() {
         </span>
       </section>
 
-      <TradeSignalPanel signals={tradeSignalDetails} />
+      <TradeConditionPanel scans={tradeConditionScans} complete={summary?.complete} />
 
       <section className="workspace">
         <div className="table-region">
@@ -225,44 +233,72 @@ function Coverage({ venues }) {
   return <span className="coverage"><span>{coverage.toFixed(1)}%</span><i><b style={{ width: `${coverage}%` }} /></i></span>;
 }
 
-function TradeSignalPanel({ signals }) {
+function TradeConditionPanel({ scans, complete }) {
+  const { canLong, stopLong, errors } = groupTradeConditionScans(scans);
   return (
-    <section className="trade-signal-panel" aria-label="本轮交易信号">
+    <section className="trade-signal-panel" aria-label="交易条件扫描">
       <header className="trade-signal-heading">
-        <strong>本轮交易信号</strong>
-        <span>基于 Binance 15 分钟已收盘 K 线</span>
+        <strong>交易条件扫描</strong>
+        <span>OI / 市值 &gt; 100%，基于 Binance 15 分钟已收盘 K 线；企业微信仅在状态变化时推送</span>
       </header>
-      {signals.length ? (
-        <div className="trade-signal-list">
-          {signals.map((signal) => <TradeSignalCard key={`${signal.event_type}-${signal.canonical_symbol}-${signal.candle_close_time}`} signal={signal} />)}
-        </div>
-      ) : <p className="trade-signal-empty">本轮暂无新的开多或停止开多信号。</p>}
+      {!complete
+        ? <p className="trade-signal-empty">数据源不完整，本轮未执行交易条件扫描。</p>
+        : !scans.length
+          ? <p className="trade-signal-empty">本轮没有 OI / 市值大于 100% 的标的。</p>
+          : <div className="trade-condition-groups">
+            <TradeConditionGroup title="可以做多" status="can_long" scans={canLong} />
+            <TradeConditionGroup title="停止做多" status="stop_long" scans={stopLong} />
+            <TradeConditionGroup title="K 线异常" status="kline_error" scans={errors} />
+          </div>}
     </section>
   );
 }
 
-function TradeSignalCard({ signal }) {
-  const isLong = signal.event_type === "long";
-  const reasons = signal.reasons?.map(tradeSignalReason).join("；");
+function TradeConditionGroup({ title, status, scans }) {
   return (
-    <article className={`trade-signal-card trade-signal-${signal.event_type}`}>
+    <section className={`trade-condition-group trade-condition-${status}`}>
+      <header><strong>{title}</strong><span>{scans.length} 个</span></header>
+      {scans.length
+        ? <div className="trade-condition-list">
+          {scans.map((scan) => <TradeConditionCard key={`${scan.status}-${scan.canonical_symbol}-${scan.candle_close_time ?? "error"}`} scan={scan} />)}
+        </div>
+        : <p className="trade-condition-empty">暂无标的</p>}
+    </section>
+  );
+}
+
+function TradeConditionCard({ scan }) {
+  const reasons = scan.reasons?.map(tradeConditionReason).join("；");
+  return (
+    <article className={`trade-signal-card trade-signal-${scan.status}`}>
       <header>
-        <span className="trade-signal-type">{tradeSignalLabel(signal.event_type)}</span>
-        <strong>{signal.canonical_symbol}</strong>
-        <time>{formatShanghaiTime(new Date(signal.candle_close_time).toISOString())}</time>
+        <strong>{scan.canonical_symbol}</strong>
+        <time>{scan.candle_close_time ? formatShanghaiTime(new Date(scan.candle_close_time).toISOString()) : "—"}</time>
       </header>
-      <dl>
-        <div><dt>RSI(14)</dt><dd>{Number(signal.rsi).toFixed(2)}</dd></div>
-        <div><dt>收盘价</dt><dd>{formatTradePrice(signal.close)}</dd></div>
-        <div><dt>EMA200</dt><dd>{formatTradePrice(signal.ema200)}</dd></div>
-        <div><dt>OI / 市值</dt><dd>{formatRatio(signal.oi_to_market_cap)}</dd></div>
-        {isLong && <div><dt>止损</dt><dd>{formatTradePrice(signal.stop_loss)}</dd></div>}
-      </dl>
-      {isLong
-        ? <p className="trade-signal-note">满足 OI / 市值 &gt; 100%、收盘价高于 EMA200、RSI(14) &lt; 50。</p>
-        : <p className="trade-signal-note">停止原因：{reasons}。</p>}
+      {scan.status === "kline_error"
+        ? <>
+          <p className="trade-condition-error">{scan.error}</p>
+          <p className="trade-signal-note">OI / 市值：{formatRatio(scan.oi_to_market_cap)}</p>
+        </>
+        : <>
+          <dl>
+            <div><dt>RSI(14)</dt><dd>{Number(scan.rsi).toFixed(2)}</dd></div>
+            <div><dt>收盘价</dt><dd>{formatTradePrice(scan.close)}</dd></div>
+            <div><dt>EMA200</dt><dd>{formatTradePrice(scan.ema200)}</dd></div>
+            <div><dt>OI / 市值</dt><dd>{formatRatio(scan.oi_to_market_cap)}</dd></div>
+          </dl>
+          {scan.status === "can_long"
+            ? <p className="trade-signal-note">满足收盘价高于 EMA200、RSI(14) 小于 50。</p>
+            : <p className="trade-signal-note">停止原因：{reasons}。</p>}
+        </>}
     </article>
   );
+}
+
+function tradeConditionReason(reason) {
+  if (reason === "rsi_not_below_50") return "RSI(14) 未低于 50";
+  if (reason === "close_not_above_ema200") return "15m 收盘价未高于 EMA200";
+  return reason;
 }
 
 function formatTradePrice(value) {

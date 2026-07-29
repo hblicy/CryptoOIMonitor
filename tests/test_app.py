@@ -7,6 +7,8 @@ from argparse import ArgumentTypeError
 
 from app import MonitorApplication, next_refresh_schedule, positive_refresh_seconds
 from crypto_oi_monitor.trade_dispatch import (
+    TradeConditionScan,
+    TradeConditionScanResult,
     TradeSignalEvent,
     TradeSignalDispatchFailure,
     TradeSignalDispatchResult,
@@ -14,8 +16,11 @@ from crypto_oi_monitor.trade_dispatch import (
 
 
 class FakeCoordinator:
+    def __init__(self, snapshot=None) -> None:
+        self.snapshot = snapshot or {"complete": True, "comparisons": []}
+
     def refresh(self):
-        return {"complete": True, "comparisons": []}
+        return self.snapshot
 
 
 class FakeStore:
@@ -31,11 +36,69 @@ class FakeStore:
 
 
 class AppRefreshTests(unittest.TestCase):
+    def test_scans_conditions_when_wecom_is_not_configured(self) -> None:
+        application = MonitorApplication.__new__(MonitorApplication)
+        application.coordinator = FakeCoordinator()
+        application.store = FakeStore()
+        application.notifier = None
+        application.trade_kline_loader = object()
+        application._lock = threading.Lock()
+        scan = TradeConditionScan(
+            status="can_long",
+            canonical_symbol="PEPE",
+            candle_close_time=1_722_269_700_000,
+            rsi=42.5,
+            close=0.00001234,
+            ema200=0.00001111,
+            oi_to_market_cap=1.2,
+        )
+
+        with patch(
+            "app.scan_trade_conditions",
+            return_value=TradeConditionScanResult((scan,), ()),
+        ):
+            snapshot = application.refresh()
+
+        self.assertEqual(snapshot["notification"]["status"], "not_configured")
+        self.assertEqual(
+            snapshot["notification"]["trade_condition_scans"], [scan.as_dict()]
+        )
+
+    def test_scans_conditions_when_wecom_alert_delivery_fails(self) -> None:
+        application = MonitorApplication.__new__(MonitorApplication)
+        application.coordinator = FakeCoordinator()
+        application.store = FakeStore()
+        application.notifier = object()
+        application.trade_kline_loader = object()
+        application._lock = threading.Lock()
+        scan = TradeConditionScan(
+            status="stop_long",
+            canonical_symbol="PEPE",
+            candle_close_time=1_722_269_700_000,
+            rsi=55,
+            close=0.00001234,
+            ema200=0.00001111,
+            oi_to_market_cap=1.2,
+            reasons=("rsi_not_below_50",),
+        )
+
+        with patch("app.dispatch_alerts", side_effect=RuntimeError("WeCom failed")), patch(
+            "app.scan_trade_conditions",
+            return_value=TradeConditionScanResult((scan,), ()),
+        ):
+            snapshot = application.refresh()
+
+        self.assertEqual(snapshot["notification"]["status"], "error")
+        self.assertEqual(
+            snapshot["notification"]["trade_condition_scans"], [scan.as_dict()]
+        )
+
     def test_clears_states_not_in_a_complete_snapshot(self) -> None:
         application = MonitorApplication.__new__(MonitorApplication)
         application.coordinator = FakeCoordinator()
         application.store = FakeStore()
         application.notifier = None
+        application.trade_kline_loader = object()
         application._lock = threading.Lock()
 
         application.refresh()
@@ -84,7 +147,16 @@ class AppRefreshTests(unittest.TestCase):
             stop_loss=0.00001000,
             atr=0.00000117,
         )
-        dispatch_result = TradeSignalDispatchResult(("long",), (), (detail,))
+        scan = TradeConditionScan(
+            status="can_long",
+            canonical_symbol="PEPE",
+            candle_close_time=1_722_269_700_000,
+            rsi=42.5,
+            close=0.00001234,
+            ema200=0.00001111,
+            oi_to_market_cap=1.2,
+        )
+        dispatch_result = TradeSignalDispatchResult(("long",), (), (detail,), (scan,))
 
         with patch("app.dispatch_alerts", return_value=[]), patch(
             "app.dispatch_trade_signals", return_value=dispatch_result
@@ -106,6 +178,22 @@ class AppRefreshTests(unittest.TestCase):
                     "stop_loss": 0.00001,
                     "atr": 0.00000117,
                     "reasons": [],
+                }
+            ],
+        )
+        self.assertEqual(
+            snapshot["notification"]["trade_condition_scans"],
+            [
+                {
+                    "status": "can_long",
+                    "canonical_symbol": "PEPE",
+                    "candle_close_time": 1_722_269_700_000,
+                    "rsi": 42.5,
+                    "close": 0.00001234,
+                    "ema200": 0.00001111,
+                    "oi_to_market_cap": 1.2,
+                    "reasons": [],
+                    "error": None,
                 }
             ],
         )

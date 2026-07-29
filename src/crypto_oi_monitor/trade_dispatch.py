@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from .trading import (
-    EMA_PERIOD,
     LONG,
     Candle,
+    REQUIRED_CLOSED_CANDLES,
     TradeSetup,
     current_ema200,
     current_rsi,
@@ -18,6 +18,8 @@ from .trading import (
 MAX_KLINE_WORKERS = 8
 LEGACY_SHORT_STATE = "short"
 STOP_LONG = "stop_long"
+CAN_LONG = "can_long"
+KLINE_ERROR = "kline_error"
 
 
 @dataclass(frozen=True)
@@ -57,10 +59,43 @@ class TradeSignalEvent:
 
 
 @dataclass(frozen=True)
+class TradeConditionScan:
+    status: str
+    canonical_symbol: str
+    candle_close_time: int | None
+    rsi: float | None
+    close: float | None
+    ema200: float | None
+    oi_to_market_cap: float
+    reasons: tuple[str, ...] = ()
+    error: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "canonical_symbol": self.canonical_symbol,
+            "candle_close_time": self.candle_close_time,
+            "rsi": self.rsi,
+            "close": self.close,
+            "ema200": self.ema200,
+            "oi_to_market_cap": self.oi_to_market_cap,
+            "reasons": list(self.reasons),
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True)
 class TradeSignalDispatchResult:
     events: tuple[str, ...]
     failures: tuple[TradeSignalDispatchFailure, ...]
     details: tuple[TradeSignalEvent, ...] = ()
+    scans: tuple[TradeConditionScan, ...] = ()
+
+
+@dataclass(frozen=True)
+class TradeConditionScanResult:
+    scans: tuple[TradeConditionScan, ...]
+    failures: tuple[TradeSignalDispatchFailure, ...]
 
 
 class TradeSignalStateStore(Protocol):
@@ -95,48 +130,20 @@ def dispatch_trade_signals(
         state = store.get_trade_signal_state(comparison["canonical_symbol"])
         if state == LEGACY_SHORT_STATE:
             store.clear_trade_signal_state(comparison["canonical_symbol"])
-            continue
+            state = None
         if comparison["oi_to_market_cap"] > 1 or state == LONG:
             candidates.append((comparison, state))
 
-    candles_by_symbol: dict[str, list[Candle]] = {}
-    failures: list[TradeSignalDispatchFailure] = []
-    if candidates:
-        with ThreadPoolExecutor(
-            max_workers=min(MAX_KLINE_WORKERS, len(candidates))
-        ) as executor:
-            futures = [
-                (
-                    comparison,
-                    state,
-                    executor.submit(kline_loader, _binance_symbol(comparison)),
-                )
-                for comparison, state in candidates
-            ]
-            for comparison, _state, future in futures:
-                canonical_symbol = comparison["canonical_symbol"]
-                try:
-                    candles = future.result()
-                except Exception as error:
-                    failures.append(
-                        TradeSignalDispatchFailure(
-                            canonical_symbol,
-                            f"{type(error).__name__}: {error}",
-                        )
-                    )
-                    continue
-                if len(candles) < EMA_PERIOD + 1:
-                    failures.append(
-                        TradeSignalDispatchFailure(
-                            canonical_symbol,
-                            f"仅获取到 {len(candles)} 根已收盘 15m K 线，需要至少 201 根",
-                        )
-                    )
-                    continue
-                candles_by_symbol[canonical_symbol] = candles
+    candidate_comparisons = [comparison for comparison, _state in candidates]
+    candles_by_symbol, failures, failures_by_symbol = _load_trade_candles(
+        candidate_comparisons, kline_loader
+    )
 
     dispatched: list[str] = []
     details: list[TradeSignalEvent] = []
+    scans = _build_trade_condition_scans(
+        candidate_comparisons, candles_by_symbol, failures_by_symbol
+    )
     for comparison, state in candidates:
         canonical_symbol = comparison["canonical_symbol"]
         candles = candles_by_symbol.get(canonical_symbol)
@@ -187,7 +194,103 @@ def dispatch_trade_signals(
                 atr=signal.atr,
             )
         )
-    return TradeSignalDispatchResult(tuple(dispatched), tuple(failures), tuple(details))
+    return TradeSignalDispatchResult(
+        tuple(dispatched), tuple(failures), tuple(details), tuple(scans)
+    )
+
+
+def scan_trade_conditions(
+    snapshot: dict[str, Any], kline_loader: Callable[[str], list[Candle]]
+) -> TradeConditionScanResult:
+    if not snapshot["complete"]:
+        return TradeConditionScanResult((), ())
+
+    comparisons = [
+        comparison
+        for comparison in snapshot["comparisons"]
+        if comparison["oi_to_market_cap"] > 1
+    ]
+    candles_by_symbol, failures, failures_by_symbol = _load_trade_candles(
+        comparisons, kline_loader
+    )
+    scans = _build_trade_condition_scans(
+        comparisons, candles_by_symbol, failures_by_symbol
+    )
+    return TradeConditionScanResult(tuple(scans), tuple(failures))
+
+
+def _load_trade_candles(
+    comparisons: list[dict[str, Any]], kline_loader: Callable[[str], list[Candle]]
+) -> tuple[
+    dict[str, list[Candle]],
+    list[TradeSignalDispatchFailure],
+    dict[str, TradeSignalDispatchFailure],
+]:
+    candles_by_symbol: dict[str, list[Candle]] = {}
+    failures: list[TradeSignalDispatchFailure] = []
+    failures_by_symbol: dict[str, TradeSignalDispatchFailure] = {}
+    if not comparisons:
+        return candles_by_symbol, failures, failures_by_symbol
+
+    with ThreadPoolExecutor(
+        max_workers=min(MAX_KLINE_WORKERS, len(comparisons))
+    ) as executor:
+        futures = [
+            (comparison, executor.submit(kline_loader, _binance_symbol(comparison)))
+            for comparison in comparisons
+        ]
+        for comparison, future in futures:
+            canonical_symbol = comparison["canonical_symbol"]
+            try:
+                candles = future.result()
+            except Exception as error:
+                failure = TradeSignalDispatchFailure(
+                    canonical_symbol,
+                    f"{type(error).__name__}: {error}",
+                )
+                failures.append(failure)
+                failures_by_symbol[canonical_symbol] = failure
+                continue
+            if len(candles) < REQUIRED_CLOSED_CANDLES:
+                failure = TradeSignalDispatchFailure(
+                    canonical_symbol,
+                    f"仅获取到 {len(candles)} 根已收盘 15m K 线，需要至少 {REQUIRED_CLOSED_CANDLES} 根",
+                )
+                failures.append(failure)
+                failures_by_symbol[canonical_symbol] = failure
+                continue
+            candles_by_symbol[canonical_symbol] = candles
+    return candles_by_symbol, failures, failures_by_symbol
+
+
+def _build_trade_condition_scans(
+    comparisons: list[dict[str, Any]],
+    candles_by_symbol: dict[str, list[Candle]],
+    failures_by_symbol: dict[str, TradeSignalDispatchFailure],
+) -> list[TradeConditionScan]:
+    scans: list[TradeConditionScan] = []
+    for comparison in comparisons:
+        if comparison["oi_to_market_cap"] <= 1:
+            continue
+        canonical_symbol = comparison["canonical_symbol"]
+        candles = candles_by_symbol.get(canonical_symbol)
+        if candles is None:
+            failure = failures_by_symbol[canonical_symbol]
+            scans.append(
+                TradeConditionScan(
+                    status=KLINE_ERROR,
+                    canonical_symbol=canonical_symbol,
+                    candle_close_time=None,
+                    rsi=None,
+                    close=None,
+                    ema200=None,
+                    oi_to_market_cap=comparison["oi_to_market_cap"],
+                    error=failure.message,
+                )
+            )
+            continue
+        scans.append(_scan_trade_condition(comparison, candles))
+    return scans
 
 
 def _binance_symbol(comparison: dict[str, Any]) -> str:
@@ -210,3 +313,26 @@ def _stop_long_reasons(
             reasons.append("close_below_ema200")
         return tuple(reasons)
     raise ValueError(f"Unsupported trade signal side: {side}")
+
+
+def _scan_trade_condition(
+    comparison: dict[str, Any], candles: list[Candle]
+) -> TradeConditionScan:
+    rsi = current_rsi(candles)
+    close = candles[-1].close
+    ema200 = current_ema200(candles)
+    reasons = []
+    if rsi >= 50:
+        reasons.append("rsi_not_below_50")
+    if close <= ema200:
+        reasons.append("close_not_above_ema200")
+    return TradeConditionScan(
+        status=CAN_LONG if not reasons else STOP_LONG,
+        canonical_symbol=comparison["canonical_symbol"],
+        candle_close_time=candles[-1].close_time,
+        rsi=rsi,
+        close=close,
+        ema200=ema200,
+        oi_to_market_cap=comparison["oi_to_market_cap"],
+        reasons=tuple(reasons),
+    )

@@ -21,6 +21,10 @@ def _candles(closes: list[float]) -> list[Candle]:
     ]
 
 
+def _warm_candles(closes: list[float], warmup_close: float = 100) -> list[Candle]:
+    return _candles([warmup_close] * 1000 + closes)
+
+
 class TradeSetupTests(unittest.TestCase):
     def test_fetches_1002_candles_and_discards_unclosed_binance_candle(self) -> None:
         class FakeClient:
@@ -62,7 +66,7 @@ class TradeSetupTests(unittest.TestCase):
             fetch_binance_closed_candles(FakeClient(), "PEPEUSDT")
 
     def test_emits_long_when_rsi_is_below_50_above_ema200_without_20_cross(self) -> None:
-        candles = _candles(
+        candles = _warm_candles(
             [100 + index for index in range(200)]
             + [298 - index for index in range(60)]
             + [246, 247]
@@ -79,32 +83,34 @@ class TradeSetupTests(unittest.TestCase):
         self.assertGreater(signal.entry_price, signal.ema200)
 
     def test_does_not_emit_short_when_rsi_crosses_down_80_below_ema200(self) -> None:
-        candles = _candles(
+        candles = _warm_candles(
             [300 - index for index in range(200)]
             + [102 + index for index in range(60)]
-            + [154]
+            + [154],
+            warmup_close=300,
         )
 
         self.assertIsNone(evaluate_trade_setup(candles))
 
     def test_does_not_emit_entry_after_rsi_reaches_50(self) -> None:
-        long_candles = _candles(
+        long_candles = _warm_candles(
             [100 + index for index in range(200)]
             + [298 - index for index in range(60)]
             + [260]
         )
-        short_candles = _candles(
+        short_candles = _warm_candles(
             [300 - index for index in range(200)]
             + [102 + index for index in range(60)]
-            + [145]
+            + [145],
+            warmup_close=300,
         )
 
         self.assertIsNone(evaluate_trade_setup(long_candles))
         self.assertIsNone(evaluate_trade_setup(short_candles))
 
     def test_rejects_unclosed_or_insufficient_candles(self) -> None:
-        with self.assertRaisesRegex(ValueError, "201 closed candles"):
-            evaluate_trade_setup(_candles([100] * 200))
+        with self.assertRaisesRegex(ValueError, "1001 closed candles"):
+            evaluate_trade_setup(_candles([100] * 1000))
 
 
 if __name__ == "__main__":

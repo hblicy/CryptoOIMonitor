@@ -67,8 +67,10 @@ def fetch_binance_closed_candles(
 
 
 def evaluate_trade_setup(candles: list[Candle]) -> TradeSetup | None:
-    if len(candles) < EMA_PERIOD + 1:
-        raise ValueError("Trade signals require at least 201 closed candles")
+    if len(candles) < REQUIRED_CLOSED_CANDLES:
+        raise ValueError(
+            f"Trade signals require at least {REQUIRED_CLOSED_CANDLES} closed candles"
+        )
     closes = [candle.close for candle in candles]
     previous_rsi, rsi = _rsi_values(closes, RSI_PERIOD)[-2:]
     ema200 = _ema(closes, EMA_PERIOD)

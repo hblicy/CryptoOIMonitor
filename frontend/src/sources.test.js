@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   SOURCE_GROUPS,
   TRADE_VENUES,
+  groupTradeConditionScans,
   sourceHealthSummary,
   tradeSignalLabel,
   tradeSignalReason,
@@ -37,5 +38,19 @@ describe("data source groups", () => {
     expect(tradeSignalLabel("stop_long")).toBe("停止开多");
     expect(tradeSignalReason("rsi_above_50")).toBe("RSI(14) 超过 50");
     expect(tradeSignalReason("close_below_ema200")).toBe("15m 收盘价低于 EMA200");
+  });
+
+  it("groups current trade conditions by their actionable state", () => {
+    const scans = [
+      { canonical_symbol: "PEPE", status: "can_long" },
+      { canonical_symbol: "DOGE", status: "stop_long" },
+      { canonical_symbol: "NEW", status: "kline_error" },
+    ];
+
+    expect(groupTradeConditionScans(scans)).toEqual({
+      canLong: [scans[0]],
+      stopLong: [scans[1]],
+      errors: [scans[2]],
+    });
   });
 });
