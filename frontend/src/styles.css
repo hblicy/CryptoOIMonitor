@@ -50,7 +50,7 @@ button:disabled { cursor: wait; opacity: .66; }
 .trade-signal-heading { display: flex; align-items: center; justify-content: space-between; min-height: 46px; padding: 0 15px; border-bottom: 1px solid #273544; }
 .trade-signal-heading strong { color: #dce7f2; font-size: 14px; }
 .trade-signal-heading span { color: #8fa2b6; font-size: 12px; }
-.trade-condition-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 10px; }
+.trade-condition-groups { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 10px; }
 .trade-condition-group { min-width: 0; border: 1px solid #33465a; border-radius: 5px; overflow: hidden; }
 .trade-condition-group > header { display: flex; align-items: center; justify-content: space-between; min-height: 37px; padding: 0 11px; border-bottom: 1px solid #33465a; background: #14202c; }
 .trade-condition-group > header strong { color: #dce7f2; font-size: 13px; }
