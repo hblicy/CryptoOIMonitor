@@ -7,6 +7,7 @@ from argparse import ArgumentTypeError
 
 from app import MonitorApplication, next_refresh_schedule, positive_refresh_seconds
 from crypto_oi_monitor.trade_dispatch import (
+    TradeSignalEvent,
     TradeSignalDispatchFailure,
     TradeSignalDispatchResult,
 )
@@ -63,6 +64,51 @@ class AppRefreshTests(unittest.TestCase):
         self.assertEqual(snapshot["notification"]["trade_signal_failures"][0]["canonical_symbol"], "NEW")
         self.assertIn("NEW", logs.output[0])
         json.dumps(snapshot)
+
+    def test_exposes_trade_signal_details_to_the_web_summary(self) -> None:
+        application = MonitorApplication.__new__(MonitorApplication)
+        application.coordinator = FakeCoordinator()
+        application.store = FakeStore()
+        application.notifier = object()
+        application.trade_kline_loader = object()
+        application._lock = threading.Lock()
+        detail = TradeSignalEvent(
+            event_type="long",
+            canonical_symbol="PEPE",
+            candle_close_time=1_722_269_700_000,
+            rsi=42.5,
+            close=0.00001234,
+            ema200=0.00001111,
+            oi_to_market_cap=1.2,
+            entry_price=0.00001234,
+            stop_loss=0.00001000,
+            atr=0.00000117,
+        )
+        dispatch_result = TradeSignalDispatchResult(("long",), (), (detail,))
+
+        with patch("app.dispatch_alerts", return_value=[]), patch(
+            "app.dispatch_trade_signals", return_value=dispatch_result
+        ):
+            snapshot = application.refresh()
+
+        self.assertEqual(
+            snapshot["notification"]["trade_signal_details"],
+            [
+                {
+                    "event_type": "long",
+                    "canonical_symbol": "PEPE",
+                    "candle_close_time": 1_722_269_700_000,
+                    "rsi": 42.5,
+                    "close": 0.00001234,
+                    "ema200": 0.00001111,
+                    "oi_to_market_cap": 1.2,
+                    "entry_price": 0.00001234,
+                    "stop_loss": 0.00001,
+                    "atr": 0.00000117,
+                    "reasons": [],
+                }
+            ],
+        )
 
     def test_registers_bingx_and_lighter_oi_loaders(self) -> None:
         with patch.dict(os.environ, {"COINMARKETCAP_API_KEY": "test-key"}), patch(

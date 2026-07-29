@@ -9,6 +9,7 @@ from .trading import (
     LONG,
     Candle,
     TradeSetup,
+    current_ema200,
     current_rsi,
     evaluate_trade_setup,
 )
@@ -26,9 +27,40 @@ class TradeSignalDispatchFailure:
 
 
 @dataclass(frozen=True)
+class TradeSignalEvent:
+    event_type: str
+    canonical_symbol: str
+    candle_close_time: int
+    rsi: float
+    close: float
+    ema200: float
+    oi_to_market_cap: float
+    entry_price: float | None = None
+    stop_loss: float | None = None
+    atr: float | None = None
+    reasons: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "event_type": self.event_type,
+            "canonical_symbol": self.canonical_symbol,
+            "candle_close_time": self.candle_close_time,
+            "rsi": self.rsi,
+            "close": self.close,
+            "ema200": self.ema200,
+            "oi_to_market_cap": self.oi_to_market_cap,
+            "entry_price": self.entry_price,
+            "stop_loss": self.stop_loss,
+            "atr": self.atr,
+            "reasons": list(self.reasons),
+        }
+
+
+@dataclass(frozen=True)
 class TradeSignalDispatchResult:
     events: tuple[str, ...]
     failures: tuple[TradeSignalDispatchFailure, ...]
+    details: tuple[TradeSignalEvent, ...] = ()
 
 
 class TradeSignalStateStore(Protocol):
@@ -44,7 +76,9 @@ class TradeSignalNotifier(Protocol):
         self, signal: TradeSetup, comparison: dict[str, Any]
     ) -> None: ...
 
-    def send_stop_long(self, comparison: dict[str, Any], rsi: float) -> None: ...
+    def send_stop_long(
+        self, comparison: dict[str, Any], rsi: float, close: float, ema200: float
+    ) -> None: ...
 
 
 def dispatch_trade_signals(
@@ -102,6 +136,7 @@ def dispatch_trade_signals(
                 candles_by_symbol[canonical_symbol] = candles
 
     dispatched: list[str] = []
+    details: list[TradeSignalEvent] = []
     for comparison, state in candidates:
         canonical_symbol = comparison["canonical_symbol"]
         candles = candles_by_symbol.get(canonical_symbol)
@@ -109,10 +144,25 @@ def dispatch_trade_signals(
             continue
         if state is not None:
             rsi = current_rsi(candles)
-            if _take_profit_reached(state, rsi):
-                notifier.send_stop_long(comparison, rsi)
+            close = candles[-1].close
+            ema200 = current_ema200(candles)
+            reasons = _stop_long_reasons(state, rsi, close, ema200)
+            if reasons:
+                notifier.send_stop_long(comparison, rsi, close, ema200)
                 store.clear_trade_signal_state(canonical_symbol)
                 dispatched.append(STOP_LONG)
+                details.append(
+                    TradeSignalEvent(
+                        event_type=STOP_LONG,
+                        canonical_symbol=canonical_symbol,
+                        candle_close_time=candles[-1].close_time,
+                        rsi=rsi,
+                        close=close,
+                        ema200=ema200,
+                        oi_to_market_cap=comparison["oi_to_market_cap"],
+                        reasons=reasons,
+                    )
+                )
             else:
                 continue
         if comparison["oi_to_market_cap"] <= 1:
@@ -123,7 +173,21 @@ def dispatch_trade_signals(
         notifier.send_trade_signal(signal, comparison)
         store.set_trade_signal_state(canonical_symbol, signal.side)
         dispatched.append(signal.side)
-    return TradeSignalDispatchResult(tuple(dispatched), tuple(failures))
+        details.append(
+            TradeSignalEvent(
+                event_type=signal.side,
+                canonical_symbol=canonical_symbol,
+                candle_close_time=signal.candle_close_time,
+                rsi=signal.rsi,
+                close=signal.entry_price,
+                ema200=signal.ema200,
+                oi_to_market_cap=comparison["oi_to_market_cap"],
+                entry_price=signal.entry_price,
+                stop_loss=signal.stop_loss,
+                atr=signal.atr,
+            )
+        )
+    return TradeSignalDispatchResult(tuple(dispatched), tuple(failures), tuple(details))
 
 
 def _binance_symbol(comparison: dict[str, Any]) -> str:
@@ -135,7 +199,14 @@ def _binance_symbol(comparison: dict[str, Any]) -> str:
     )
 
 
-def _take_profit_reached(side: str, rsi: float) -> bool:
+def _stop_long_reasons(
+    side: str, rsi: float, close: float, ema200: float
+) -> tuple[str, ...]:
     if side == LONG:
-        return rsi > 50
+        reasons = []
+        if rsi > 50:
+            reasons.append("rsi_above_50")
+        if close < ema200:
+            reasons.append("close_below_ema200")
+        return tuple(reasons)
     raise ValueError(f"Unsupported trade signal side: {side}")

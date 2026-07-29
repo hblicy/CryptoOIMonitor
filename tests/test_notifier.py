@@ -111,7 +111,7 @@ class WeComNotifierTests(unittest.TestCase):
         notifier = WeComNotifier("https://wecom.example/webhook", client)
 
         notifier.send_stop_long(
-            {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.2}, 52.5
+            {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.2}, 52.5, 101, 100
         )
 
         payload = client.sent[0][1]
@@ -124,6 +124,19 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertIn("OI / 市值：120.00%", content)
         self.assertNotIn("<font", content)
         self.assertNotIn("**", content)
+
+    def test_sends_stop_long_message_when_close_is_below_ema200(self) -> None:
+        client = RecordingClient()
+        notifier = WeComNotifier("https://wecom.example/webhook", client)
+
+        notifier.send_stop_long(
+            {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.2}, 45, 99, 100
+        )
+
+        content = client.sent[0][1]["text"]["content"]
+        self.assertIn("收盘价：99.00000000", content)
+        self.assertIn("EMA200：100.00000000", content)
+        self.assertIn("15m 收盘价已低于 EMA200", content)
 
     def test_rejects_short_trade_signals(self) -> None:
         notifier = WeComNotifier("https://wecom.example/webhook", RecordingClient())

@@ -23,6 +23,18 @@ export function sourceHealthSummary(sources) {
   };
 }
 
+export function tradeSignalLabel(eventType) {
+  if (eventType === "long") return "开多";
+  if (eventType === "stop_long") return "停止开多";
+  return eventType;
+}
+
+export function tradeSignalReason(reason) {
+  if (reason === "rsi_above_50") return "RSI(14) 超过 50";
+  if (reason === "close_below_ema200") return "15m 收盘价低于 EMA200";
+  return reason;
+}
+
 function sourceStatus(source) {
   if (!source) return "未返回";
   return source.status === "ok" ? "正常" : "异常";
@@ -79,6 +91,7 @@ function App() {
   }, []);
 
   const comparisons = summary?.comparisons ?? [];
+  const tradeSignalDetails = summary?.notification?.trade_signal_details ?? [];
   const ambushCandidateCount = comparisons.filter((item) => item.status === "high_risk").length;
   const { healthy: healthySources, total: totalSources } = sourceHealthSummary(summary?.sources);
   const selected = comparisons.find((item) => item.canonical_symbol === selectedSymbol) ?? comparisons[0];
@@ -134,6 +147,8 @@ function App() {
           {summary?.complete ? "所有数据源完整" : "数据源不完整，已暂停关注提醒推送"}
         </span>
       </section>
+
+      <TradeSignalPanel signals={tradeSignalDetails} />
 
       <section className="workspace">
         <div className="table-region">
@@ -208,6 +223,52 @@ function Source({ name, source }) {
 function Coverage({ venues }) {
   const coverage = (venues.length / TRADE_VENUES.length) * 100;
   return <span className="coverage"><span>{coverage.toFixed(1)}%</span><i><b style={{ width: `${coverage}%` }} /></i></span>;
+}
+
+function TradeSignalPanel({ signals }) {
+  return (
+    <section className="trade-signal-panel" aria-label="本轮交易信号">
+      <header className="trade-signal-heading">
+        <strong>本轮交易信号</strong>
+        <span>基于 Binance 15 分钟已收盘 K 线</span>
+      </header>
+      {signals.length ? (
+        <div className="trade-signal-list">
+          {signals.map((signal) => <TradeSignalCard key={`${signal.event_type}-${signal.canonical_symbol}-${signal.candle_close_time}`} signal={signal} />)}
+        </div>
+      ) : <p className="trade-signal-empty">本轮暂无新的开多或停止开多信号。</p>}
+    </section>
+  );
+}
+
+function TradeSignalCard({ signal }) {
+  const isLong = signal.event_type === "long";
+  const reasons = signal.reasons?.map(tradeSignalReason).join("；");
+  return (
+    <article className={`trade-signal-card trade-signal-${signal.event_type}`}>
+      <header>
+        <span className="trade-signal-type">{tradeSignalLabel(signal.event_type)}</span>
+        <strong>{signal.canonical_symbol}</strong>
+        <time>{formatShanghaiTime(new Date(signal.candle_close_time).toISOString())}</time>
+      </header>
+      <dl>
+        <div><dt>RSI(14)</dt><dd>{Number(signal.rsi).toFixed(2)}</dd></div>
+        <div><dt>收盘价</dt><dd>{formatTradePrice(signal.close)}</dd></div>
+        <div><dt>EMA200</dt><dd>{formatTradePrice(signal.ema200)}</dd></div>
+        <div><dt>OI / 市值</dt><dd>{formatRatio(signal.oi_to_market_cap)}</dd></div>
+        {isLong && <div><dt>止损</dt><dd>{formatTradePrice(signal.stop_loss)}</dd></div>}
+      </dl>
+      {isLong
+        ? <p className="trade-signal-note">满足 OI / 市值 &gt; 100%、收盘价高于 EMA200、RSI(14) &lt; 50。</p>
+        : <p className="trade-signal-note">停止原因：{reasons}。</p>}
+    </article>
+  );
+}
+
+function formatTradePrice(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "—";
+  return numeric.toLocaleString("en-US", { maximumFractionDigits: 8 });
 }
 
 function DetailPanel({ selected }) {

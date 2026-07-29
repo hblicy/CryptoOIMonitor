@@ -22,7 +22,7 @@ def _candles(closes: list[float]) -> list[Candle]:
 
 
 class TradeSetupTests(unittest.TestCase):
-    def test_fetches_202_candles_and_discards_unclosed_binance_candle(self) -> None:
+    def test_fetches_1002_candles_and_discards_unclosed_binance_candle(self) -> None:
         class FakeClient:
             def __init__(self) -> None:
                 self.calls = []
@@ -31,24 +31,35 @@ class TradeSetupTests(unittest.TestCase):
                 self.calls.append((url, params))
                 return [
                     [index, "0", "12", "8", "10", "0", index + 1]
-                    for index in range(202)
+                    for index in range(1002)
                 ]
 
         client = FakeClient()
         candles = fetch_binance_closed_candles(client, "PEPEUSDT")
 
-        self.assertEqual(len(candles), 201)
+        self.assertEqual(len(candles), 1001)
         self.assertEqual(candles[0], Candle(1, 12, 8, 10))
-        self.assertEqual(candles[-1], Candle(201, 12, 8, 10))
+        self.assertEqual(candles[-1], Candle(1001, 12, 8, 10))
         self.assertEqual(
             client.calls,
             [
                 (
                     BINANCE_KLINES_URL,
-                    {"symbol": "PEPEUSDT", "interval": "15m", "limit": "202"},
+                    {"symbol": "PEPEUSDT", "interval": "15m", "limit": "1002"},
                 )
             ],
         )
+
+    def test_rejects_insufficient_history_for_ema200_warmup(self) -> None:
+        class FakeClient:
+            def get_json(self, url, params):
+                return [
+                    [index, "0", "12", "8", "10", "0", index + 1]
+                    for index in range(202)
+                ]
+
+        with self.assertRaisesRegex(ValueError, "1001 closed candles"):
+            fetch_binance_closed_candles(FakeClient(), "PEPEUSDT")
 
     def test_emits_long_when_rsi_is_below_50_above_ema200_without_20_cross(self) -> None:
         candles = _candles(

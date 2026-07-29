@@ -46,6 +46,26 @@ button:disabled { cursor: wait; opacity: .66; }
 .snapshot-state { padding-left: 18px; border-left: 1px solid #2a3745; font-size: 13px; white-space: nowrap; }
 .snapshot-ok { color: #82df98; }
 
+.trade-signal-panel { margin-top: 10px; border: 1px solid #243140; border-radius: 7px; background: #101720; overflow: hidden; }
+.trade-signal-heading { display: flex; align-items: center; justify-content: space-between; min-height: 46px; padding: 0 15px; border-bottom: 1px solid #273544; }
+.trade-signal-heading strong { color: #dce7f2; font-size: 14px; }
+.trade-signal-heading span { color: #8fa2b6; font-size: 12px; }
+.trade-signal-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(345px, 1fr)); gap: 10px; padding: 10px; }
+.trade-signal-card { min-width: 0; border: 1px solid #33465a; border-radius: 5px; background: #111c27; padding: 12px 13px; }
+.trade-signal-long { border-left: 3px solid #50d66b; }
+.trade-signal-stop_long { border-left: 3px solid #ff7681; }
+.trade-signal-card header { display: flex; align-items: baseline; gap: 9px; }
+.trade-signal-type { color: #aebdcd; font-size: 12px; font-weight: 720; }
+.trade-signal-long .trade-signal-type { color: #61db7c; }
+.trade-signal-stop_long .trade-signal-type { color: #ff8992; }
+.trade-signal-card strong { color: #f1f6fb; font-size: 16px; }
+.trade-signal-card time { margin-left: auto; color: #91a2b3; font-size: 12px; white-space: nowrap; }
+.trade-signal-card dl { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 12px 0 0; gap: 9px; }
+.trade-signal-card dt { color: #91a2b3; font-size: 11px; }
+.trade-signal-card dd { margin: 5px 0 0; overflow: hidden; color: #e3ebf4; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.trade-signal-note { margin: 11px 0 0; color: #aebdcb; font-size: 12px; line-height: 1.5; }
+.trade-signal-empty { margin: 0; padding: 15px; color: #92a4b6; font-size: 13px; }
+
 .workspace { align-items: stretch; min-height: 630px; margin-top: 10px; border: 1px solid #243140; border-radius: 7px; background: #101720; overflow: hidden; }
 .table-region { min-width: 0; flex: 1; }
 .toolbar { align-items: center; gap: 16px; padding: 15px 16px; border-bottom: 1px solid #253140; }
@@ -95,4 +115,4 @@ tbody tr.selected-row td { background: #12263a; box-shadow: inset 0 1px #209ee3,
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
 @media (max-width: 1180px) { .workspace { flex-direction: column; } .detail-panel { width: 100%; flex-basis: auto; border-top: 1px solid #2a3745; border-left: 0; } }
-@media (max-width: 760px) { .app-shell { padding: 12px; } .topbar { align-items: flex-start; flex-direction: column; } .topbar-actions { align-items: flex-start; flex-wrap: wrap; white-space: normal; } .summary-strip { display: grid; grid-template-columns: 1fr 1fr; } .metric { min-height: 82px; border-bottom: 1px solid #273544; } .metric:nth-child(2) { border-right: 0; } .metric-wide { grid-column: span 2; border-bottom: 0; } .source-strip { align-items: flex-start; flex-direction: column; gap: 10px; } .snapshot-state { padding-left: 0; border-left: 0; } .toolbar { flex-wrap: wrap; gap: 10px; } .search-control { flex: 1 1 100%; } .search-control input { width: 100%; } .detail-metrics { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .app-shell { padding: 12px; } .topbar { align-items: flex-start; flex-direction: column; } .topbar-actions { align-items: flex-start; flex-wrap: wrap; white-space: normal; } .summary-strip { display: grid; grid-template-columns: 1fr 1fr; } .metric { min-height: 82px; border-bottom: 1px solid #273544; } .metric:nth-child(2) { border-right: 0; } .metric-wide { grid-column: span 2; border-bottom: 0; } .source-strip { align-items: flex-start; flex-direction: column; gap: 10px; } .snapshot-state { padding-left: 0; border-left: 0; } .trade-signal-heading { align-items: flex-start; flex-direction: column; justify-content: center; gap: 3px; padding: 9px 13px; } .trade-signal-list { grid-template-columns: 1fr; } .trade-signal-card dl { grid-template-columns: repeat(2, minmax(0, 1fr)); } .trade-signal-card time { white-space: normal; text-align: right; } .toolbar { flex-wrap: wrap; gap: 10px; } .search-control { flex: 1 1 100%; } .search-control input { width: 100%; } .detail-metrics { grid-template-columns: 1fr; } }

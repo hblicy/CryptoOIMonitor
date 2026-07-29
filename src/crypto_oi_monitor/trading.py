@@ -7,6 +7,8 @@ from typing import Any, Protocol
 RSI_PERIOD = 14
 ATR_PERIOD = 14
 EMA_PERIOD = 200
+EMA_WARMUP_CANDLES = 1000
+REQUIRED_CLOSED_CANDLES = EMA_WARMUP_CANDLES + 1
 LONG = "long"
 BINANCE_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
 
@@ -40,9 +42,13 @@ def fetch_binance_closed_candles(
 ) -> list[Candle]:
     payload = client.get_json(
         BINANCE_KLINES_URL,
-        {"symbol": symbol, "interval": "15m", "limit": "202"},
+        {
+            "symbol": symbol,
+            "interval": "15m",
+            "limit": str(REQUIRED_CLOSED_CANDLES + 1),
+        },
     )
-    return [
+    candles = [
         Candle(
             close_time=int(candle[6]),
             high=float(candle[2]),
@@ -51,6 +57,13 @@ def fetch_binance_closed_candles(
         )
         for candle in payload[:-1]
     ]
+    if len(candles) < REQUIRED_CLOSED_CANDLES:
+        raise ValueError(
+            "Binance returned only "
+            f"{len(candles)} closed candles; EMA200 requires at least "
+            f"{REQUIRED_CLOSED_CANDLES} closed candles"
+        )
+    return candles
 
 
 def evaluate_trade_setup(candles: list[Candle]) -> TradeSetup | None:
@@ -78,6 +91,10 @@ def evaluate_trade_setup(candles: list[Candle]) -> TradeSetup | None:
 
 def current_rsi(candles: list[Candle]) -> float:
     return _rsi_values([candle.close for candle in candles], RSI_PERIOD)[-1]
+
+
+def current_ema200(candles: list[Candle]) -> float:
+    return _ema([candle.close for candle in candles], EMA_PERIOD)
 
 
 def _ema(values: list[float], period: int) -> float:

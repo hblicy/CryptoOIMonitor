@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { SOURCE_GROUPS, TRADE_VENUES, sourceHealthSummary } from "./App";
+import {
+  SOURCE_GROUPS,
+  TRADE_VENUES,
+  sourceHealthSummary,
+  tradeSignalLabel,
+  tradeSignalReason,
+} from "./App";
 
 describe("data source groups", () => {
   it("separates CEX, DEX, and market-cap sources", () => {
@@ -24,5 +30,12 @@ describe("data source groups", () => {
       healthy: 0,
       total: 12,
     });
+  });
+
+  it("labels long and stop-long signal details for the dashboard", () => {
+    expect(tradeSignalLabel("long")).toBe("开多");
+    expect(tradeSignalLabel("stop_long")).toBe("停止开多");
+    expect(tradeSignalReason("rsi_above_50")).toBe("RSI(14) 超过 50");
+    expect(tradeSignalReason("close_below_ema200")).toBe("15m 收盘价低于 EMA200");
   });
 });

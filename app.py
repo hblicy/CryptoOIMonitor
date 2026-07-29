@@ -176,6 +176,10 @@ class MonitorApplication:
                                 "status": "partial",
                                 "events": events,
                                 "trade_signal_events": list(trade_result.events),
+                                "trade_signal_details": [
+                                    detail.as_dict()
+                                    for detail in trade_result.details
+                                ],
                                 "trade_signal_failures": [
                                     {
                                         "canonical_symbol": failure.canonical_symbol,
@@ -194,6 +198,10 @@ class MonitorApplication:
                                 "status": "ok",
                                 "events": events,
                                 "trade_signal_events": list(trade_result.events),
+                                "trade_signal_details": [
+                                    detail.as_dict()
+                                    for detail in trade_result.details
+                                ],
                             }
             self.store.save_snapshot(snapshot)
             self._latest = snapshot
