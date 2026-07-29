@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
 from typing import Callable, Protocol
 
 from .domain import ContractOpenInterest
 from .market_caps import MarketCapLookup
 from .snapshot import SourceHealth, build_snapshot
 from .sources import BinanceInstrument
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SnapshotWriter(Protocol):
@@ -67,6 +71,7 @@ class RefreshCoordinator:
                 try:
                     value = future.result()
                 except Exception as error:
+                    LOGGER.exception("%s refresh failed", name)
                     health[name] = SourceHealth.failed(_message(error))
                     continue
                 if kind == "venue":

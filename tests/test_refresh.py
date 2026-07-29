@@ -15,6 +15,28 @@ class InMemoryStore:
 
 
 class RefreshCoordinatorTests(unittest.TestCase):
+    def test_logs_the_venue_name_and_traceback_when_a_source_fails(self) -> None:
+        coordinator = RefreshCoordinator(
+            universe_loader=lambda: {"ETH": BinanceInstrument("ETH", "ETHUSDT")},
+            venue_loaders={
+                "BingX": lambda assets: (_ for _ in ()).throw(
+                    RuntimeError("BingX request timed out")
+                )
+            },
+            market_cap_loader=lambda assets: MarketCapLookup(
+                {"ETH": MarketCap("ethereum", 100)}, ()
+            ),
+            store=InMemoryStore(),
+            now=lambda: "2026-07-29T00:00:00+00:00",
+        )
+
+        with self.assertLogs("crypto_oi_monitor.refresh", "ERROR") as logs:
+            snapshot = coordinator.refresh()
+
+        self.assertEqual(snapshot["sources"]["BingX"]["status"], "error")
+        self.assertIn("BingX refresh failed", logs.output[0])
+        self.assertIn("RuntimeError: BingX request timed out", logs.output[0])
+
     def test_passes_binance_instruments_to_market_cap_loader(self) -> None:
         universe = {"ETH": BinanceInstrument("ETH", "ETHUSDT", 3_000)}
         received = []
@@ -48,12 +70,14 @@ class RefreshCoordinatorTests(unittest.TestCase):
             now=lambda: "2026-07-24T00:00:00+00:00",
         )
 
-        snapshot = coordinator.refresh()
+        with self.assertLogs("crypto_oi_monitor.refresh", "ERROR") as logs:
+            snapshot = coordinator.refresh()
 
         self.assertFalse(snapshot["complete"])
         self.assertEqual(snapshot["comparisons"][0]["total_oi_usd"], 120)
         self.assertEqual(snapshot["sources"]["OKX"]["status"], "error")
         self.assertIn("source down", snapshot["sources"]["OKX"]["message"])
+        self.assertIn("OKX refresh failed", logs.output[0])
         self.assertEqual(
             snapshot["sources"]["CoinMarketCap"]["updated_at"],
             "2026-07-24T00:00:00+00:00",
