@@ -15,6 +15,22 @@ class InMemoryStore:
 
 
 class RefreshCoordinatorTests(unittest.TestCase):
+    def test_passes_binance_instruments_to_market_cap_loader(self) -> None:
+        universe = {"ETH": BinanceInstrument("ETH", "ETHUSDT", 3_000)}
+        received = []
+        coordinator = RefreshCoordinator(
+            universe_loader=lambda: universe,
+            venue_loaders={},
+            market_cap_loader=lambda instruments: received.append(instruments)
+            or MarketCapLookup({"ETH": MarketCap("ethereum", 100)}, ()),
+            store=InMemoryStore(),
+            now=lambda: "2026-07-29T00:00:00+00:00",
+        )
+
+        coordinator.refresh()
+
+        self.assertEqual(received, [universe])
+
     def test_records_source_error_without_using_stale_oi(self) -> None:
         store = InMemoryStore()
         coordinator = RefreshCoordinator(

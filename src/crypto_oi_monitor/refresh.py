@@ -20,7 +20,7 @@ class RefreshCoordinator:
         venue_loaders: dict[
             str, Callable[[dict[str, BinanceInstrument]], list[ContractOpenInterest]]
         ],
-        market_cap_loader: Callable[[set[str]], MarketCapLookup],
+        market_cap_loader: Callable[[dict[str, BinanceInstrument]], MarketCapLookup],
         store: SnapshotWriter,
         now: Callable[[], str],
         persist: bool = True,
@@ -57,7 +57,7 @@ class RefreshCoordinator:
                 executor.submit(loader, universe): ("venue", name)
                 for name, loader in self.venue_loaders.items()
             }
-            pending[executor.submit(self.market_cap_loader, selected_assets)] = (
+            pending[executor.submit(self.market_cap_loader, universe)] = (
                 "market_cap",
                 "CoinMarketCap",
             )
