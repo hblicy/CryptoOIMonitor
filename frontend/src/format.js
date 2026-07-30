@@ -20,8 +20,8 @@ export function formatRatio(value) {
 }
 
 export function riskLabel(status) {
-  if (status === "high_risk") return "埋伏候选（>200%）";
-  if (status === "warning") return "重点关注（>100%）";
+  if (status === "high_risk") return "埋伏候选区（>200%）";
+  if (status === "warning") return "重点关注（>110%）";
   return "常规";
 }
 

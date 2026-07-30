@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 
 BINANCE_MIN_TURNOVER_USD = 10_000_000
+FOCUS_OI_TO_MARKET_CAP_RATIO = 1.1
+AMBUSH_OI_TO_MARKET_CAP_RATIO = 2
 NORMAL = "normal"
 WARNING = "warning"
 HIGH_RISK = "high_risk"
@@ -30,9 +32,9 @@ class AssetComparison:
 
 
 def risk_status(oi_to_market_cap: float) -> str:
-    if oi_to_market_cap > 2:
+    if oi_to_market_cap > AMBUSH_OI_TO_MARKET_CAP_RATIO:
         return HIGH_RISK
-    if oi_to_market_cap > 1:
+    if oi_to_market_cap > FOCUS_OI_TO_MARKET_CAP_RATIO:
         return WARNING
     return NORMAL
 

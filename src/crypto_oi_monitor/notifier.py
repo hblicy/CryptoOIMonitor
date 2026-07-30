@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from .alerts import ENTERED_HIGH_RISK, RECOVERED
+from .domain import FOCUS_OI_TO_MARKET_CAP_RATIO
 from .trading import LONG, TradeSetup
 
 
@@ -81,7 +82,7 @@ def _trade_message(signal: TradeSetup, comparison: dict[str, Any]) -> str:
         f"周期：15m（已收盘）\n"
         f"参考入场：{signal.entry_price:.8f}\n"
         f"止损：{signal.stop_loss:.8f}（2 × ATR(14)）\n"
-        f"停止开多条件：OI / 市值不高于 100%、RSI(14) 超过 50 或 15m 收盘价低于 EMA200\n"
+        f"停止开多条件：OI / 市值低于 110%、RSI(14) 超过 50 或 15m 收盘价低于 EMA200\n"
         f"杠杆参考：2-3倍\n"
         f"RSI(14)：{signal.rsi:.2f}\n"
         f"EMA200：{signal.ema200:.8f}\n"
@@ -97,8 +98,8 @@ def _stop_long_message(
     ema200: float | None,
 ) -> str:
     reasons = []
-    if comparison["oi_to_market_cap"] <= 1:
-        reasons.append("OI / 市值已不高于 100%")
+    if comparison["oi_to_market_cap"] < FOCUS_OI_TO_MARKET_CAP_RATIO:
+        reasons.append("OI / 市值已低于 110%")
     if rsi is not None and rsi > 50:
         reasons.append("RSI(14) 已超过 50")
     if close is not None and ema200 is not None and close < ema200:

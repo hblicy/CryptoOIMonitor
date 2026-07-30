@@ -12,15 +12,16 @@ from crypto_oi_monitor.domain import (
 
 
 class RiskStatusTests(unittest.TestCase):
-    def test_marks_oi_above_market_cap_as_warning(self) -> None:
-        self.assertEqual(risk_status(1.000001), WARNING)
+    def test_marks_oi_above_110_percent_as_warning(self) -> None:
+        self.assertEqual(risk_status(1.1), NORMAL)
+        self.assertEqual(risk_status(1.100001), WARNING)
 
     def test_marks_oi_strictly_above_two_times_market_cap_as_high_risk(self) -> None:
         self.assertEqual(risk_status(2.0), WARNING)
         self.assertEqual(risk_status(2.000001), HIGH_RISK)
 
-    def test_marks_oi_not_above_market_cap_as_normal(self) -> None:
-        self.assertEqual(risk_status(1.0), NORMAL)
+    def test_marks_oi_not_above_110_percent_as_normal(self) -> None:
+        self.assertEqual(risk_status(1.099999), NORMAL)
 
 
 class BinanceUniverseTests(unittest.TestCase):

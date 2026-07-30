@@ -30,7 +30,7 @@ export function tradeSignalLabel(eventType) {
 }
 
 export function tradeSignalReason(reason) {
-  if (reason === "oi_to_market_cap_not_above_100") return "OI / 市值不高于 100%";
+  if (reason === "oi_to_market_cap_below_110") return "OI / 市值低于 110%";
   if (reason === "rsi_above_50") return "RSI(14) 超过 50";
   if (reason === "close_below_ema200") return "15m 收盘价低于 EMA200";
   return reason;
@@ -171,8 +171,8 @@ function App() {
               <span className="sr-only">关注状态</span>
               <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
                 <option value="all">全部关注状态</option>
-                <option value="high_risk">埋伏候选（&gt;200%）</option>
-                <option value="warning">重点关注（&gt;100%）</option>
+                <option value="high_risk">埋伏候选区（&gt;200%）</option>
+                <option value="warning">重点关注（&gt;110%）</option>
                 <option value="normal">常规</option>
               </select>
             </label>
@@ -181,7 +181,7 @@ function App() {
               仅看关注项
             </label>
           </div>
-          <p className="formula">指标说明：OI / 市值 = 聚合永续合约未平仓量（OI）÷ 代币市值（MC）。当比例 &gt; 100% 为重点关注；&gt; 200% 为埋伏候选区。</p>
+          <p className="formula">指标说明：OI / 市值 = 聚合永续合约未平仓量（OI）÷ 代币市值（MC）。当比例 &gt; 110% 为重点关注；&gt; 200% 为埋伏候选区。</p>
           <div className="table-scroll">
             <table>
               <thead>
@@ -276,12 +276,12 @@ function TradeConditionPanel({ scans, complete }) {
     <section className="trade-signal-panel" aria-label="交易条件扫描">
       <header className="trade-signal-heading">
         <strong>交易条件扫描</strong>
-        <span>OI / 市值 &gt; 100%，基于 Binance 15 分钟已收盘 K 线；企业微信仅在状态变化时推送</span>
+        <span>OI / 市值 &gt; 110%，基于 Binance 15 分钟已收盘 K 线；企业微信仅在状态变化时推送</span>
       </header>
       {!complete
         ? <p className="trade-signal-empty">数据源不完整，本轮未执行交易条件扫描。</p>
         : !scans.length
-          ? <p className="trade-signal-empty">本轮没有 OI / 市值大于 100% 的标的。</p>
+          ? <p className="trade-signal-empty">本轮没有 OI / 市值大于 110% 的标的。</p>
           : <div className="trade-condition-groups">
             <TradeConditionGroup title="可以做多" status="can_long" scans={canLong} />
             <TradeConditionGroup title="停止做多" status="stop_long" scans={stopLong} />

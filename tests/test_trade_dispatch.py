@@ -113,7 +113,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
         self.assertGreater(notifier.stop_longs[0][1], 50)
 
-    def test_requires_oi_to_market_cap_strictly_above_100_percent(self) -> None:
+    def test_requires_oi_to_market_cap_strictly_above_110_percent(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()
         snapshot = {
@@ -121,7 +121,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.0,
+                    "oi_to_market_cap": 1.1,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -132,6 +132,29 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.events, ())
         self.assertEqual(notifier.signals, [])
 
+    def test_does_not_stop_active_long_at_exactly_110_percent(self) -> None:
+        store = MemoryStore()
+        store.states["PEPE"] = "long"
+        notifier = RecordingNotifier()
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "oi_to_market_cap": 1.1,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        result = dispatch_trade_signals(
+            snapshot, lambda _: _long_setup_candles(), store, notifier
+        )
+
+        self.assertEqual(result.events, ())
+        self.assertEqual(notifier.stop_longs, [])
+        self.assertEqual(store.states["PEPE"], "long")
+
     def test_scans_all_eligible_assets_into_can_long_and_stop_long_groups(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()
@@ -140,12 +163,12 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 },
                 {
                     "canonical_symbol": "DOGE",
-                    "oi_to_market_cap": 1.1,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "DOGEUSDT"}],
                 },
             ],
@@ -177,7 +200,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -195,7 +218,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -216,7 +239,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -227,7 +250,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.scans[0].status, "kline_error")
         self.assertIn("1001", result.scans[0].error)
 
-    def test_stops_active_long_after_rsi_exceeds_50_below_oi_threshold(self) -> None:
+    def test_stops_active_long_below_110_percent_before_loading_rsi(self) -> None:
         store = MemoryStore()
         store.states["PEPE"] = "long"
         notifier = RecordingNotifier()
@@ -236,7 +259,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.0,
+                    "oi_to_market_cap": 1.09,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -249,12 +272,12 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.events, ("stop_long",))
         self.assertEqual(
             result.details[0].reasons,
-            ("oi_to_market_cap_not_above_100",),
+            ("oi_to_market_cap_below_110",),
         )
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
         self.assertNotIn("PEPE", store.states)
 
-    def test_stops_active_long_when_oi_to_market_cap_is_100_percent(self) -> None:
+    def test_stops_active_long_when_oi_to_market_cap_is_below_110_percent(self) -> None:
         store = MemoryStore()
         store.states["PEPE"] = "long"
         notifier = RecordingNotifier()
@@ -263,7 +286,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.0,
+                    "oi_to_market_cap": 1.09,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -275,7 +298,7 @@ class TradeDispatchTests(unittest.TestCase):
 
         self.assertEqual(result.events, ("stop_long",))
         self.assertEqual(
-            result.details[0].reasons, ("oi_to_market_cap_not_above_100",)
+            result.details[0].reasons, ("oi_to_market_cap_below_110",)
         )
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
         self.assertNotIn("PEPE", store.states)
@@ -305,7 +328,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.events, ("stop_long",))
         self.assertEqual(result.failures, ())
         self.assertEqual(
-            result.details[0].reasons, ("oi_to_market_cap_not_above_100",)
+            result.details[0].reasons, ("oi_to_market_cap_below_110",)
         )
         self.assertIsNone(result.details[0].candle_close_time)
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
@@ -351,7 +374,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -374,7 +397,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -400,7 +423,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -427,12 +450,12 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "NEW",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "NEWUSDT"}],
                 },
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 },
             ],
@@ -461,12 +484,12 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 },
                 {
                     "canonical_symbol": "DOGE",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "DOGEUSDT"}],
                 },
             ],
@@ -489,12 +512,12 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "NEW",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "NEWUSDT"}],
                 },
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 },
             ],
@@ -523,12 +546,12 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "BAD",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "BADUSDT"}],
                 },
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.6,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 },
             ],

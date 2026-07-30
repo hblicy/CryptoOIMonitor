@@ -100,7 +100,7 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertIn("PEPE", content)
         self.assertIn("参考入场：246.00000000", content)
         self.assertIn("止损：240.00000000", content)
-        self.assertIn("OI / 市值不高于 100%", content)
+        self.assertIn("OI / 市值低于 110%", content)
         self.assertIn("RSI(14) 超过 50", content)
         self.assertIn("杠杆参考：2-3倍", content)
         self.assertIn("OI / 市值：120.00%", content)
@@ -139,19 +139,19 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertIn("EMA200：100.00000000", content)
         self.assertIn("15m 收盘价已低于 EMA200", content)
 
-    def test_sends_stop_long_message_when_oi_to_market_cap_is_not_above_100(
+    def test_sends_stop_long_message_when_oi_to_market_cap_is_below_110(
         self,
     ) -> None:
         client = RecordingClient()
         notifier = WeComNotifier("https://wecom.example/webhook", client)
 
         notifier.send_stop_long(
-            {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.0}, 52.5, 101, 100
+            {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.09}, None, None, None
         )
 
         content = client.sent[0][1]["text"]["content"]
-        self.assertIn("OI / 市值已不高于 100%", content)
-        self.assertIn("OI / 市值：100.00%", content)
+        self.assertIn("OI / 市值已低于 110%", content)
+        self.assertIn("OI / 市值：109.00%", content)
 
     def test_sends_oi_threshold_stop_message_without_kline_metrics(self) -> None:
         client = RecordingClient()
