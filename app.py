@@ -18,7 +18,6 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from crypto_oi_monitor.dispatch import dispatch_alerts
 from crypto_oi_monitor.http_client import HttpJsonClient
 from crypto_oi_monitor.market_caps import CachedMarketCapLoader, parse_cmc_id_overrides
 from crypto_oi_monitor.notifier import WeComNotifier
@@ -180,80 +179,63 @@ class MonitorApplication:
                 }
             else:
                 try:
-                    events = dispatch_alerts(snapshot, self.store, self.notifier)
+                    trade_result = dispatch_trade_signals(
+                        snapshot,
+                        self.trade_kline_loader,
+                        self.store,
+                        self.notifier,
+                    )
                 except Exception as error:
-                    LOGGER.exception("企业微信推送失败")
+                    LOGGER.exception("交易信号推送失败")
                     snapshot["notification"] = {
-                        "status": "error",
-                        "message": f"{type(error).__name__}: {error}",
+                        "status": "partial",
+                        "trade_signal_status": "error",
+                        "message": f"交易信号失败：{type(error).__name__}: {error}",
                         **_condition_scan_payload(
                             scan_trade_conditions(snapshot, self.trade_kline_loader)
                         ),
                     }
                 else:
-                    try:
-                        trade_result = dispatch_trade_signals(
-                            snapshot,
-                            self.trade_kline_loader,
-                            self.store,
-                            self.notifier,
-                        )
-                    except Exception as error:
-                        LOGGER.exception("交易信号推送失败")
+                    if trade_result.failures:
+                        for failure in trade_result.failures:
+                            LOGGER.warning(
+                                "交易信号已跳过 %s：%s",
+                                failure.canonical_symbol,
+                                failure.message,
+                            )
                         snapshot["notification"] = {
                             "status": "partial",
-                            "events": events,
-                            "trade_signal_status": "error",
-                            "message": f"交易信号失败：{type(error).__name__}: {error}",
-                            **_condition_scan_payload(
-                                scan_trade_conditions(snapshot, self.trade_kline_loader)
+                            "trade_signal_events": list(trade_result.events),
+                            "trade_signal_details": [
+                                detail.as_dict() for detail in trade_result.details
+                            ],
+                            "trade_condition_scans": [
+                                scan.as_dict() for scan in trade_result.scans
+                            ],
+                            "trade_signal_failures": [
+                                {
+                                    "canonical_symbol": failure.canonical_symbol,
+                                    "message": failure.message,
+                                }
+                                for failure in trade_result.failures
+                            ],
+                            "message": "交易信号部分失败："
+                            + "；".join(
+                                f"{failure.canonical_symbol}: {failure.message}"
+                                for failure in trade_result.failures
                             ),
                         }
                     else:
-                        if trade_result.failures:
-                            for failure in trade_result.failures:
-                                LOGGER.warning(
-                                    "交易信号已跳过 %s：%s",
-                                    failure.canonical_symbol,
-                                    failure.message,
-                                )
-                            snapshot["notification"] = {
-                                "status": "partial",
-                                "events": events,
-                                "trade_signal_events": list(trade_result.events),
-                                "trade_signal_details": [
-                                    detail.as_dict()
-                                    for detail in trade_result.details
-                                ],
-                                "trade_condition_scans": [
-                                    scan.as_dict() for scan in trade_result.scans
-                                ],
-                                "trade_signal_failures": [
-                                    {
-                                        "canonical_symbol": failure.canonical_symbol,
-                                        "message": failure.message,
-                                    }
-                                    for failure in trade_result.failures
-                                ],
-                                "message": "交易信号部分失败："
-                                + "；".join(
-                                    f"{failure.canonical_symbol}: {failure.message}"
-                                    for failure in trade_result.failures
-                                ),
-                            }
-                        else:
-                            snapshot["notification"] = {
-                                "status": "ok",
-                                "events": events,
-                                "trade_signal_events": list(trade_result.events),
-                                "trade_signal_details": [
-                                    detail.as_dict()
-                                    for detail in trade_result.details
-                                ],
-                                "trade_condition_scans": [
-                                    scan.as_dict() for scan in trade_result.scans
-                                ],
-                            }
+                        snapshot["notification"] = {
+                            "status": "ok",
+                            "trade_signal_events": list(trade_result.events),
+                            "trade_signal_details": [
+                                detail.as_dict() for detail in trade_result.details
+                            ],
+                            "trade_condition_scans": [
+                                scan.as_dict() for scan in trade_result.scans
+                            ],
+                        }
             self.store.save_snapshot(snapshot)
             self._latest = snapshot
             return snapshot

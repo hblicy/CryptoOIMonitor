@@ -35,6 +35,11 @@ class FakeStore:
         return 0, 0
 
 
+class TradeSignalOnlyNotifier:
+    def send(self, event, comparison) -> None:
+        raise AssertionError("不应发送 OI 埋伏候选提醒")
+
+
 class AppRefreshTests(unittest.TestCase):
     def test_scans_conditions_when_wecom_is_not_configured(self) -> None:
         application = MonitorApplication.__new__(MonitorApplication)
@@ -64,33 +69,40 @@ class AppRefreshTests(unittest.TestCase):
             snapshot["notification"]["trade_condition_scans"], [scan.as_dict()]
         )
 
-    def test_scans_conditions_when_wecom_alert_delivery_fails(self) -> None:
+    def test_skips_ambush_notifications_and_dispatches_trade_signals(self) -> None:
         application = MonitorApplication.__new__(MonitorApplication)
-        application.coordinator = FakeCoordinator()
+        application.coordinator = FakeCoordinator(
+            {
+                "complete": True,
+                "comparisons": [
+                    {
+                        "canonical_symbol": "PEPE",
+                        "oi_to_market_cap": 2.1,
+                        "status": "high_risk",
+                    }
+                ],
+            }
+        )
         application.store = FakeStore()
-        application.notifier = object()
+        application.notifier = TradeSignalOnlyNotifier()
         application.trade_kline_loader = object()
         application._lock = threading.Lock()
-        scan = TradeConditionScan(
-            status="stop_long",
-            canonical_symbol="PEPE",
-            candle_close_time=1_722_269_700_000,
-            rsi=55,
-            close=0.00001234,
-            ema200=0.00001111,
-            oi_to_market_cap=1.2,
-            reasons=("rsi_not_below_50",),
-        )
 
-        with patch("app.dispatch_alerts", side_effect=RuntimeError("WeCom failed")), patch(
+        with patch(
+            "app.dispatch_trade_signals",
+            return_value=TradeSignalDispatchResult((), ()),
+        ) as dispatch_trade_signals_mock, patch(
             "app.scan_trade_conditions",
-            return_value=TradeConditionScanResult((scan,), ()),
+            return_value=TradeConditionScanResult((), ()),
         ):
             snapshot = application.refresh()
 
-        self.assertEqual(snapshot["notification"]["status"], "error")
-        self.assertEqual(
-            snapshot["notification"]["trade_condition_scans"], [scan.as_dict()]
+        self.assertEqual(snapshot["notification"]["status"], "ok")
+        dispatch_trade_signals_mock.assert_called_once_with(
+            snapshot,
+            application.trade_kline_loader,
+            application.store,
+            application.notifier,
         )
 
     def test_clears_states_not_in_a_complete_snapshot(self) -> None:
@@ -138,8 +150,8 @@ class AppRefreshTests(unittest.TestCase):
         )
 
         with self.assertLogs("crypto_oi_monitor", level="WARNING") as logs, patch(
-            "app.dispatch_alerts", return_value=[]
-        ), patch("app.dispatch_trade_signals", return_value=dispatch_result):
+            "app.dispatch_trade_signals", return_value=dispatch_result
+        ):
             snapshot = application.refresh()
 
         self.assertEqual(snapshot["notification"]["status"], "partial")
@@ -178,9 +190,7 @@ class AppRefreshTests(unittest.TestCase):
         )
         dispatch_result = TradeSignalDispatchResult(("long",), (), (detail,), (scan,))
 
-        with patch("app.dispatch_alerts", return_value=[]), patch(
-            "app.dispatch_trade_signals", return_value=dispatch_result
-        ):
+        with patch("app.dispatch_trade_signals", return_value=dispatch_result):
             snapshot = application.refresh()
 
         self.assertEqual(
