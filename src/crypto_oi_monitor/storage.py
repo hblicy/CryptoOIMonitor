@@ -8,6 +8,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from .trade_dispatch import TradeConditionListState
+
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_SNAPSHOT_RETENTION_DAYS = 30
@@ -54,6 +56,16 @@ class SnapshotStore:
                 CREATE TABLE IF NOT EXISTS trade_signal_states (
                     canonical_symbol TEXT PRIMARY KEY,
                     side TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_condition_list_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    can_long_symbols TEXT NOT NULL,
+                    stop_long_symbols TEXT NOT NULL,
+                    last_sent_at TEXT
                 )
                 """
             )
@@ -189,6 +201,42 @@ class SnapshotStore:
                 (canonical_symbol,),
             )
 
+    def get_trade_condition_list_state(self) -> TradeConditionListState:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT can_long_symbols, stop_long_symbols, last_sent_at
+                FROM trade_condition_list_state
+                WHERE id = 1
+                """
+            ).fetchone()
+        if row is None:
+            return TradeConditionListState((), (), None)
+        return TradeConditionListState(
+            tuple(json.loads(row[0])),
+            tuple(json.loads(row[1])),
+            None if row[2] is None else datetime.fromisoformat(row[2]),
+        )
+
+    def set_trade_condition_list_state(self, state: TradeConditionListState) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO trade_condition_list_state (
+                    id, can_long_symbols, stop_long_symbols, last_sent_at
+                ) VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    can_long_symbols = excluded.can_long_symbols,
+                    stop_long_symbols = excluded.stop_long_symbols,
+                    last_sent_at = excluded.last_sent_at
+                """,
+                (
+                    json.dumps(state.can_long, separators=(",", ":")),
+                    json.dumps(state.stop_long, separators=(",", ":")),
+                    None if state.last_sent_at is None else state.last_sent_at.isoformat(),
+                ),
+            )
+
     def clear_states_outside(self, active_assets: set[str]) -> tuple[int, int]:
         with self._connect() as connection:
             if not active_assets:
@@ -196,15 +244,40 @@ class SnapshotStore:
                 removed_trade_signals = connection.execute(
                     "DELETE FROM trade_signal_states"
                 ).rowcount
-                return removed_alerts, removed_trade_signals
-            placeholders = ", ".join("?" for _ in active_assets)
-            parameters = tuple(sorted(active_assets))
-            removed_alerts = connection.execute(
-                f"DELETE FROM alert_states WHERE canonical_symbol NOT IN ({placeholders})",
-                parameters,
-            ).rowcount
-            removed_trade_signals = connection.execute(
-                f"DELETE FROM trade_signal_states WHERE canonical_symbol NOT IN ({placeholders})",
-                parameters,
-            ).rowcount
-            return removed_alerts, removed_trade_signals
+            else:
+                placeholders = ", ".join("?" for _ in active_assets)
+                parameters = tuple(sorted(active_assets))
+                removed_alerts = connection.execute(
+                    f"DELETE FROM alert_states WHERE canonical_symbol NOT IN ({placeholders})",
+                    parameters,
+                ).rowcount
+                removed_trade_signals = connection.execute(
+                    f"DELETE FROM trade_signal_states WHERE canonical_symbol NOT IN ({placeholders})",
+                    parameters,
+                ).rowcount
+        return removed_alerts, removed_trade_signals
+
+    def clear_trade_condition_list_state_outside(self, active_assets: set[str]) -> int:
+        previous_list_state = self.get_trade_condition_list_state()
+        can_long = tuple(
+            symbol
+            for symbol in previous_list_state.can_long
+            if symbol in active_assets
+        )
+        stop_long = tuple(
+            symbol
+            for symbol in previous_list_state.stop_long
+            if symbol in active_assets
+        )
+        removed_condition_list_symbols = len(previous_list_state.can_long) - len(
+            can_long
+        ) + len(previous_list_state.stop_long) - len(stop_long)
+        if removed_condition_list_symbols:
+            self.set_trade_condition_list_state(
+                TradeConditionListState(
+                    can_long,
+                    stop_long,
+                    previous_list_state.last_sent_at,
+                )
+            )
+        return removed_condition_list_symbols

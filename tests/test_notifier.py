@@ -15,6 +15,33 @@ class RecordingClient:
 
 
 class WeComNotifierTests(unittest.TestCase):
+    def test_sends_trade_condition_lists_with_symbols_only(self) -> None:
+        client = RecordingClient()
+        notifier = WeComNotifier("https://wecom.example/webhook", client)
+
+        notifier.send_trade_condition_list(
+            ("AKE", "BULLA"), ("ESPORTS", "ON"), periodic=False
+        )
+
+        payload = client.sent[0][1]
+        content = payload["text"]["content"]
+        self.assertEqual(payload["msgtype"], "text")
+        self.assertIn("交易条件列表更新", content)
+        self.assertIn("AKE、BULLA", content)
+        self.assertIn("ESPORTS、ON", content)
+        self.assertNotIn("RSI", content)
+        self.assertNotIn("OI / 市值", content)
+
+    def test_sends_hourly_trade_condition_lists_with_periodic_title(self) -> None:
+        client = RecordingClient()
+        notifier = WeComNotifier("https://wecom.example/webhook", client)
+
+        notifier.send_trade_condition_list((), (), periodic=True)
+
+        content = client.sent[0][1]["text"]["content"]
+        self.assertIn("交易条件列表定时播报", content)
+        self.assertIn("暂无", content)
+
     def test_sends_ambush_candidate_with_aggregate_metrics_only(self) -> None:
         client = RecordingClient()
         notifier = WeComNotifier("https://wecom.example/webhook", client)

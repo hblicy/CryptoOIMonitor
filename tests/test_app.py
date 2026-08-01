@@ -2,7 +2,7 @@ import json
 import os
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 from argparse import ArgumentTypeError
 
 from app import MonitorApplication, next_refresh_schedule, positive_refresh_seconds
@@ -33,6 +33,10 @@ class FakeStore:
     def clear_states_outside(self, active_assets) -> None:
         self.active_assets = active_assets
         return 0, 0
+
+    def clear_trade_condition_list_state_outside(self, active_assets) -> None:
+        self.condition_list_active_assets = active_assets
+        return 0
 
 
 class TradeSignalOnlyNotifier:
@@ -94,6 +98,9 @@ class AppRefreshTests(unittest.TestCase):
         ) as dispatch_trade_signals_mock, patch(
             "app.scan_trade_conditions",
             return_value=TradeConditionScanResult((), ()),
+        ), patch(
+            "app.dispatch_trade_condition_list",
+            return_value="periodic",
         ):
             snapshot = application.refresh()
 
@@ -151,12 +158,14 @@ class AppRefreshTests(unittest.TestCase):
 
         with self.assertLogs("crypto_oi_monitor", level="WARNING") as logs, patch(
             "app.dispatch_trade_signals", return_value=dispatch_result
-        ):
+        ), patch("app.dispatch_trade_condition_list") as dispatch_list_mock:
             snapshot = application.refresh()
 
         self.assertEqual(snapshot["notification"]["status"], "partial")
         self.assertEqual(snapshot["notification"]["trade_signal_events"], [])
         self.assertEqual(snapshot["notification"]["trade_signal_failures"][0]["canonical_symbol"], "NEW")
+        self.assertEqual(snapshot["notification"]["trade_condition_list_status"], "suppressed")
+        dispatch_list_mock.assert_not_called()
         self.assertIn("NEW", logs.output[0])
         json.dumps(snapshot)
 
@@ -190,7 +199,9 @@ class AppRefreshTests(unittest.TestCase):
         )
         dispatch_result = TradeSignalDispatchResult(("long",), (), (detail,), (scan,))
 
-        with patch("app.dispatch_trade_signals", return_value=dispatch_result):
+        with patch("app.dispatch_trade_signals", return_value=dispatch_result), patch(
+            "app.dispatch_trade_condition_list", return_value="updated"
+        ):
             snapshot = application.refresh()
 
         self.assertEqual(
@@ -226,6 +237,34 @@ class AppRefreshTests(unittest.TestCase):
                     "error": None,
                 }
             ],
+        )
+
+    def test_pushes_condition_list_after_a_complete_condition_scan(self) -> None:
+        application = MonitorApplication.__new__(MonitorApplication)
+        application.coordinator = FakeCoordinator()
+        application.store = FakeStore()
+        application.notifier = object()
+        application.trade_kline_loader = object()
+        application._lock = threading.Lock()
+        scan = TradeConditionScan(
+            status="can_long",
+            canonical_symbol="BULLA",
+            candle_close_time=1_722_269_700_000,
+            rsi=42.5,
+            close=0.00001234,
+            ema200=0.00001111,
+            oi_to_market_cap=1.2,
+        )
+        dispatch_result = TradeSignalDispatchResult((), (), (), (scan,))
+
+        with patch("app.dispatch_trade_signals", return_value=dispatch_result), patch(
+            "app.dispatch_trade_condition_list", return_value="updated"
+        ) as dispatch_list_mock:
+            snapshot = application.refresh()
+
+        self.assertEqual(snapshot["notification"]["trade_condition_list_event"], "updated")
+        dispatch_list_mock.assert_called_once_with(
+            (scan,), application.store, application.notifier, ANY
         )
 
     def test_registers_bingx_and_lighter_oi_loaders(self) -> None:

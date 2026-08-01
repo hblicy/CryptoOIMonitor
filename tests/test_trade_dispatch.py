@@ -1,8 +1,12 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 from threading import Barrier
+from types import SimpleNamespace
 
 from crypto_oi_monitor.http_client import DataSourceRequestError
 from crypto_oi_monitor.trade_dispatch import (
+    TradeConditionScan,
+    dispatch_trade_condition_list,
     dispatch_trade_signals,
     scan_trade_conditions,
 )
@@ -71,7 +75,151 @@ class RecordingNotifier:
         self.stop_longs.append((comparison["canonical_symbol"], rsi, close, ema200))
 
 
+class ConditionListStore:
+    def __init__(self, state) -> None:
+        self.state = state
+
+    def get_trade_condition_list_state(self):
+        return self.state
+
+    def set_trade_condition_list_state(self, state) -> None:
+        self.state = state
+
+
+class ConditionListNotifier:
+    def __init__(self) -> None:
+        self.lists = []
+
+    def send_trade_condition_list(self, can_long, stop_long, periodic) -> None:
+        self.lists.append((can_long, stop_long, periodic))
+
+
+class FailingConditionListNotifier:
+    def send_trade_condition_list(self, can_long, stop_long, periodic) -> None:
+        raise RuntimeError("WeCom failed")
+
+
+def _condition_scan(symbol: str, status: str) -> TradeConditionScan:
+    return TradeConditionScan(
+        status=status,
+        canonical_symbol=symbol,
+        candle_close_time=1_722_269_700_000,
+        rsi=42.5,
+        close=1,
+        ema200=0.9,
+        oi_to_market_cap=1.2,
+    )
+
+
 class TradeDispatchTests(unittest.TestCase):
+    def test_sends_current_lists_when_new_condition_symbols_appear(self) -> None:
+        now = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+        store = ConditionListStore(
+            SimpleNamespace(
+                can_long=("AKE",),
+                stop_long=("ON",),
+                last_sent_at=now - timedelta(minutes=5),
+            )
+        )
+        notifier = ConditionListNotifier()
+
+        result = dispatch_trade_condition_list(
+            (
+                _condition_scan("BULLA", "can_long"),
+                _condition_scan("AKE", "can_long"),
+                _condition_scan("ESPORTS", "stop_long"),
+                _condition_scan("ON", "stop_long"),
+            ),
+            store,
+            notifier,
+            now,
+        )
+
+        self.assertEqual(result, "updated")
+        self.assertEqual(
+            notifier.lists,
+            [(("AKE", "BULLA"), ("ESPORTS", "ON"), False)],
+        )
+        self.assertEqual(store.state.can_long, ("AKE", "BULLA"))
+        self.assertEqual(store.state.stop_long, ("ESPORTS", "ON"))
+        self.assertEqual(store.state.last_sent_at, now)
+
+    def test_persists_removals_without_sending_before_one_hour(self) -> None:
+        now = datetime(2026, 8, 1, 0, 30, tzinfo=timezone.utc)
+        last_sent_at = now - timedelta(minutes=30)
+        store = ConditionListStore(
+            SimpleNamespace(
+                can_long=("AKE", "BULLA"),
+                stop_long=("ON",),
+                last_sent_at=last_sent_at,
+            )
+        )
+        notifier = ConditionListNotifier()
+
+        result = dispatch_trade_condition_list(
+            (
+                _condition_scan("AKE", "can_long"),
+                _condition_scan("ON", "stop_long"),
+            ),
+            store,
+            notifier,
+            now,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(notifier.lists, [])
+        self.assertEqual(store.state.can_long, ("AKE",))
+        self.assertEqual(store.state.stop_long, ("ON",))
+        self.assertEqual(store.state.last_sent_at, last_sent_at)
+
+    def test_sends_current_lists_every_hour_without_new_symbols(self) -> None:
+        now = datetime(2026, 8, 1, 1, 0, tzinfo=timezone.utc)
+        store = ConditionListStore(
+            SimpleNamespace(
+                can_long=("AKE",),
+                stop_long=("ON",),
+                last_sent_at=now - timedelta(hours=1),
+            )
+        )
+        notifier = ConditionListNotifier()
+
+        result = dispatch_trade_condition_list(
+            (
+                _condition_scan("AKE", "can_long"),
+                _condition_scan("ON", "stop_long"),
+            ),
+            store,
+            notifier,
+            now,
+        )
+
+        self.assertEqual(result, "periodic")
+        self.assertEqual(notifier.lists, [(("AKE",), ("ON",), True)])
+        self.assertEqual(store.state.last_sent_at, now)
+
+    def test_does_not_update_list_state_when_notification_fails(self) -> None:
+        now = datetime(2026, 8, 1, 1, 0, tzinfo=timezone.utc)
+        previous_state = SimpleNamespace(
+            can_long=("AKE",),
+            stop_long=("ON",),
+            last_sent_at=now - timedelta(minutes=5),
+        )
+        store = ConditionListStore(previous_state)
+
+        with self.assertRaisesRegex(RuntimeError, "WeCom failed"):
+            dispatch_trade_condition_list(
+                (
+                    _condition_scan("AKE", "can_long"),
+                    _condition_scan("BULLA", "can_long"),
+                    _condition_scan("ON", "stop_long"),
+                ),
+                store,
+                FailingConditionListNotifier(),
+                now,
+            )
+
+        self.assertIs(store.state, previous_state)
+
     def test_sends_one_long_signal_until_rsi_returns_to_50(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()

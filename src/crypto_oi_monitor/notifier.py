@@ -54,6 +54,26 @@ class WeComNotifier:
         if response["errcode"] != 0:
             raise RuntimeError(f"WeCom webhook rejected message: {response}")
 
+    def send_trade_condition_list(
+        self,
+        can_long: tuple[str, ...],
+        stop_long: tuple[str, ...],
+        periodic: bool,
+    ) -> None:
+        response = self.client.post_json(
+            self.webhook_url,
+            {
+                "msgtype": "text",
+                "text": {
+                    "content": _trade_condition_list_message(
+                        can_long, stop_long, periodic
+                    )
+                },
+            },
+        )
+        if response["errcode"] != 0:
+            raise RuntimeError(f"WeCom webhook rejected message: {response}")
+
 
 def _message(event: str, comparison: dict[str, Any]) -> str:
     if event == ENTERED_HIGH_RISK:
@@ -88,6 +108,19 @@ def _trade_message(signal: TradeSetup, comparison: dict[str, Any]) -> str:
         f"EMA200：{signal.ema200:.8f}\n"
         f"ATR(14)：{signal.atr:.8f}\n"
         f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%"
+    )
+
+
+def _trade_condition_list_message(
+    can_long: tuple[str, ...], stop_long: tuple[str, ...], periodic: bool
+) -> str:
+    title = "【交易条件列表定时播报】" if periodic else "【交易条件列表更新】"
+    can_long_content = "、".join(can_long) or "暂无"
+    stop_long_content = "、".join(stop_long) or "暂无"
+    return (
+        f"{title}\n\n"
+        f"可以做多\n{can_long_content}\n\n"
+        f"停止做多\n{stop_long_content}"
     )
 
 

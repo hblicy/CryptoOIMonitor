@@ -1,10 +1,12 @@
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from crypto_oi_monitor.storage import SnapshotStore
+from crypto_oi_monitor.trade_dispatch import TradeConditionListState
 
 
 class SnapshotStoreTests(unittest.TestCase):
@@ -29,6 +31,47 @@ class SnapshotStoreTests(unittest.TestCase):
             self.assertEqual(store.get_trade_signal_state("ETH"), "long")
             store.clear_trade_signal_state("ETH")
             self.assertIsNone(store.get_trade_signal_state("ETH"))
+
+    def test_persists_trade_condition_list_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SnapshotStore(Path(temp_dir) / "monitor.db")
+
+            store.set_trade_condition_list_state(
+                TradeConditionListState(
+                    ("AKE",),
+                    ("ON",),
+                    datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc),
+                )
+            )
+
+            state = store.get_trade_condition_list_state()
+
+            self.assertEqual(state.can_long, ("AKE",))
+            self.assertEqual(state.stop_long, ("ON",))
+            self.assertEqual(
+                state.last_sent_at,
+                datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc),
+            )
+
+    def test_clears_trade_condition_list_symbols_outside_active_comparisons(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SnapshotStore(Path(temp_dir) / "monitor.db")
+            store.set_trade_condition_list_state(
+                TradeConditionListState(
+                    ("AKE", "BULLA"),
+                    ("BULLA", "ON"),
+                    datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc),
+                )
+            )
+
+            removed = store.clear_trade_condition_list_state_outside({"AKE", "ON"})
+            state = store.get_trade_condition_list_state()
+
+            self.assertEqual(removed, 2)
+            self.assertEqual(state.can_long, ("AKE",))
+            self.assertEqual(state.stop_long, ("ON",))
 
     def test_clears_alert_and_trade_states_outside_active_comparisons(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

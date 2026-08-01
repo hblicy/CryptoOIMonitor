@@ -40,6 +40,7 @@ from crypto_oi_monitor.sources import (
 from crypto_oi_monitor.storage import SnapshotStore
 from crypto_oi_monitor.trade_dispatch import (
     TradeConditionScanResult,
+    dispatch_trade_condition_list,
     dispatch_trade_signals,
     scan_trade_conditions,
 )
@@ -151,23 +152,31 @@ class MonitorApplication:
         with self._lock:
             snapshot = self.coordinator.refresh()
             if snapshot["complete"]:
+                active_assets = {
+                    comparison["canonical_symbol"]
+                    for comparison in snapshot["comparisons"]
+                } | set(snapshot.get("unmapped_assets", []))
                 removed_alerts, removed_trade_signals = self.store.clear_states_outside(
-                    {
-                        comparison["canonical_symbol"]
-                        for comparison in snapshot["comparisons"]
-                    }
-                    | set(snapshot.get("unmapped_assets", []))
+                    active_assets
                 )
-                if removed_alerts or removed_trade_signals:
+                removed_condition_list_symbols = (
+                    self.store.clear_trade_condition_list_state_outside(active_assets)
+                )
+                if (
+                    removed_alerts
+                    or removed_trade_signals
+                    or removed_condition_list_symbols
+                ):
                     LOGGER.info(
-                        "清除不在当前比较范围内的状态：%s 个关注提醒，%s 个交易信号",
+                        "清除不在当前比较范围内的状态：%s 个关注提醒，%s 个交易信号，%s 个交易条件列表币种",
                         removed_alerts,
                         removed_trade_signals,
+                        removed_condition_list_symbols,
                     )
             if self.notifier is None:
                 snapshot["notification"] = {
                     "status": "not_configured",
-                    "message": "WECOM_ROBOT_WEBHOOK_URL 未配置，企业微信关注提醒未启用。",
+                    "message": "WECOM_ROBOT_WEBHOOK_URL 未配置，企业微信推送未启用。",
                     **_condition_scan_payload(
                         scan_trade_conditions(snapshot, self.trade_kline_loader)
                     ),
@@ -175,7 +184,7 @@ class MonitorApplication:
             elif not snapshot["complete"]:
                 snapshot["notification"] = {
                     "status": "suppressed",
-                    "message": "数据源不完整，本轮不会推送企业微信关注提醒。",
+                    "message": "数据源不完整，本轮不会推送企业微信消息。",
                 }
             else:
                 try:
@@ -219,6 +228,7 @@ class MonitorApplication:
                                 }
                                 for failure in trade_result.failures
                             ],
+                            "trade_condition_list_status": "suppressed",
                             "message": "交易信号部分失败："
                             + "；".join(
                                 f"{failure.canonical_symbol}: {failure.message}"
@@ -226,16 +236,39 @@ class MonitorApplication:
                             ),
                         }
                     else:
-                        snapshot["notification"] = {
-                            "status": "ok",
-                            "trade_signal_events": list(trade_result.events),
-                            "trade_signal_details": [
-                                detail.as_dict() for detail in trade_result.details
-                            ],
-                            "trade_condition_scans": [
-                                scan.as_dict() for scan in trade_result.scans
-                            ],
-                        }
+                        try:
+                            condition_list_event = dispatch_trade_condition_list(
+                                trade_result.scans,
+                                self.store,
+                                self.notifier,
+                                datetime.now(timezone.utc),
+                            )
+                        except Exception as error:
+                            LOGGER.exception("交易条件列表推送失败")
+                            snapshot["notification"] = {
+                                "status": "partial",
+                                "trade_signal_events": list(trade_result.events),
+                                "trade_signal_details": [
+                                    detail.as_dict() for detail in trade_result.details
+                                ],
+                                "trade_condition_scans": [
+                                    scan.as_dict() for scan in trade_result.scans
+                                ],
+                                "trade_condition_list_status": "error",
+                                "message": f"交易条件列表失败：{type(error).__name__}: {error}",
+                            }
+                        else:
+                            snapshot["notification"] = {
+                                "status": "ok",
+                                "trade_signal_events": list(trade_result.events),
+                                "trade_signal_details": [
+                                    detail.as_dict() for detail in trade_result.details
+                                ],
+                                "trade_condition_scans": [
+                                    scan.as_dict() for scan in trade_result.scans
+                                ],
+                                "trade_condition_list_event": condition_list_event,
+                            }
             self.store.save_snapshot(snapshot)
             self._latest = snapshot
             return snapshot

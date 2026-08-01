@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Callable, Protocol
 
 from .domain import FOCUS_OI_TO_MARKET_CAP_RATIO
@@ -21,6 +22,7 @@ LEGACY_SHORT_STATE = "short"
 STOP_LONG = "stop_long"
 CAN_LONG = "can_long"
 KLINE_ERROR = "kline_error"
+TRADE_CONDITION_LIST_INTERVAL = timedelta(hours=1)
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,28 @@ class TradeConditionScanResult:
     failures: tuple[TradeSignalDispatchFailure, ...]
 
 
+@dataclass(frozen=True)
+class TradeConditionListState:
+    can_long: tuple[str, ...]
+    stop_long: tuple[str, ...]
+    last_sent_at: datetime | None
+
+
+class TradeConditionListStateStore(Protocol):
+    def get_trade_condition_list_state(self) -> TradeConditionListState: ...
+
+    def set_trade_condition_list_state(self, state: TradeConditionListState) -> None: ...
+
+
+class TradeConditionListNotifier(Protocol):
+    def send_trade_condition_list(
+        self,
+        can_long: tuple[str, ...],
+        stop_long: tuple[str, ...],
+        periodic: bool,
+    ) -> None: ...
+
+
 class TradeSignalStateStore(Protocol):
     def get_trade_signal_state(self, canonical_symbol: str) -> str | None: ...
 
@@ -119,6 +143,50 @@ class TradeSignalNotifier(Protocol):
         close: float | None,
         ema200: float | None,
     ) -> None: ...
+
+
+def dispatch_trade_condition_list(
+    scans: tuple[TradeConditionScan, ...],
+    store: TradeConditionListStateStore,
+    notifier: TradeConditionListNotifier,
+    now: datetime,
+) -> str | None:
+    can_long = tuple(
+        sorted(
+            {
+                scan.canonical_symbol
+                for scan in scans
+                if scan.status == CAN_LONG
+            }
+        )
+    )
+    stop_long = tuple(
+        sorted(
+            {
+                scan.canonical_symbol
+                for scan in scans
+                if scan.status == STOP_LONG
+            }
+        )
+    )
+    previous = store.get_trade_condition_list_state()
+    has_new_symbols = bool(
+        set(can_long) - set(previous.can_long)
+        or set(stop_long) - set(previous.stop_long)
+    )
+    periodic = (
+        previous.last_sent_at is None
+        or now - previous.last_sent_at >= TRADE_CONDITION_LIST_INTERVAL
+    )
+    event = "updated" if has_new_symbols else "periodic" if periodic else None
+    last_sent_at = previous.last_sent_at
+    if event is not None:
+        notifier.send_trade_condition_list(can_long, stop_long, event == "periodic")
+        last_sent_at = now
+    store.set_trade_condition_list_state(
+        TradeConditionListState(can_long, stop_long, last_sent_at)
+    )
+    return event
 
 
 def dispatch_trade_signals(
