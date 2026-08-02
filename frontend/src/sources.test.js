@@ -38,6 +38,7 @@ describe("data source groups", () => {
     expect(tradeSignalLabel("long")).toBe("开多");
     expect(tradeSignalLabel("stop_long")).toBe("停止开多");
     expect(tradeSignalReason("oi_to_market_cap_below_110")).toBe("OI / 市值低于 110%");
+    expect(tradeSignalReason("oi_to_market_cap_not_above_130")).toBe("OI / 市值未高于 130%");
     expect(tradeSignalReason("rsi_above_50")).toBe("RSI(14) 超过 50");
     expect(tradeSignalReason("close_below_ema200")).toBe("15m 收盘价低于 EMA200");
   });

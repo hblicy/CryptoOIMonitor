@@ -5,7 +5,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable, Protocol
 
-from .domain import FOCUS_OI_TO_MARKET_CAP_RATIO
+from .domain import (
+    FOCUS_OI_TO_MARKET_CAP_RATIO,
+    TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO,
+)
 from .trading import (
     LONG,
     Candle,
@@ -376,7 +379,7 @@ def dispatch_trade_signals(
             if reasons:
                 continue
             store.clear_trade_signal_state(canonical_symbol)
-        if comparison["oi_to_market_cap"] <= FOCUS_OI_TO_MARKET_CAP_RATIO:
+        if comparison["oi_to_market_cap"] <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO:
             continue
         signal = evaluate_trade_setup(candles)
         if signal is None:
@@ -529,7 +532,14 @@ def _scan_trade_condition(
 ) -> TradeConditionScan:
     indicators = trade_indicators(candles)
     forced_exit_reasons = exit_reasons(candles, indicators, None)
-    reasons = forced_exit_reasons or entry_reasons(indicators)
+    entry_threshold_reasons = (
+        ("oi_to_market_cap_not_above_130",)
+        if comparison["oi_to_market_cap"] <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO
+        else ()
+    )
+    reasons = forced_exit_reasons or (
+        entry_threshold_reasons + entry_reasons(indicators)
+    )
     return TradeConditionScan(
         status=(
             EXIT_LONG

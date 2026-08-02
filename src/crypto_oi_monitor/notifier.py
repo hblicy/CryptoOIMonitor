@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from .alerts import ENTERED_HIGH_RISK, RECOVERED
+from .domain import TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO
 from .trade_dispatch import TradeSignalState
 from .trading import LONG, TradeIndicators, TradeSetup
 
@@ -123,7 +124,8 @@ def _trade_message(signal: TradeSetup, comparison: dict[str, Any]) -> str:
         f"周期：15m（已收盘）\n"
         f"参考入场：{signal.entry_price:.8f}\n"
         f"止损：{signal.stop_loss:.8f}（2 × ATR(14)）\n"
-        "做多条件：OI / 市值 > 110%；1h 趋势向上；15m 收盘价高于 EMA200 + 0.25 × ATR；"
+        f"做多条件：OI / 市值 > {TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO * 100:.0f}%；"
+        "1h 趋势向上；15m 收盘价高于 EMA200 + 0.25 × ATR；"
         "RSI(14) 在 35-50 且回升\n"
         "风险规则：亏损不补仓；触及止损或 EMA 结构退出条件时必须退出。\n"
         f"杠杆参考：2-3倍\n"
@@ -205,6 +207,7 @@ def _exit_long_message(
 def _reason_text(reason: str) -> str:
     labels = {
         "oi_to_market_cap_below_110": "OI / 市值已低于 110%",
+        "oi_to_market_cap_not_above_130": "OI / 市值未高于 130%",
         "hourly_close_not_above_ema200": "1h 收盘价未高于 EMA200",
         "hourly_ema200_not_rising": "1h EMA200 未上行",
         "close_not_above_ema200_buffer": "15m 收盘价未高于 EMA200 + 0.25 × ATR",

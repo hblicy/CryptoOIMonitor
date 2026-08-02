@@ -41,6 +41,7 @@ export function tradeSignalReason(reason) {
   if (reason === "rsi_not_below_50") return "RSI(14) 未低于 50";
   if (reason === "rsi_not_rising") return "RSI(14) 未回升";
   if (reason === "oi_to_market_cap_below_110") return "OI / 市值低于 110%";
+  if (reason === "oi_to_market_cap_not_above_130") return "OI / 市值未高于 130%";
   if (reason === "rsi_above_50") return "RSI(14) 超过 50";
   if (reason === "close_below_ema200") return "15m 收盘价低于 EMA200";
   return reason;
@@ -291,7 +292,7 @@ function TradeConditionPanel({ scans, complete }) {
     <section className="trade-signal-panel" aria-label="交易条件扫描">
       <header className="trade-signal-heading">
         <strong>交易条件扫描</strong>
-        <span>OI / 市值 &gt; 110%；1h 趋势向上；15m 收盘价高于 EMA200 + 0.25 × ATR；RSI 在 35-50 且回升</span>
+        <span>OI / 市值 &gt; 130%；1h 趋势向上；15m 收盘价高于 EMA200 + 0.25 × ATR；RSI 在 35-50 且回升</span>
       </header>
       {!complete
         ? <p className="trade-signal-empty">数据源不完整，本轮未执行交易条件扫描。</p>

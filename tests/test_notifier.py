@@ -149,6 +149,7 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertIn("参考入场：246.00000000", content)
         self.assertIn("止损：240.00000000", content)
         self.assertIn("做多条件", content)
+        self.assertIn("OI / 市值 > 130%", content)
         self.assertIn("亏损不补仓", content)
         self.assertIn("杠杆参考：2-3倍", content)
         self.assertIn("OI / 市值：120.00%", content)

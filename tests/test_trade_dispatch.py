@@ -8,6 +8,7 @@ from crypto_oi_monitor.trade_dispatch import (
     EXIT_LONG,
     REENTRY_COOLDOWN,
     REENTRY_COOLDOWN_CANDLES,
+    STOP_LONG,
     TradeSignalState,
     TradeConditionScan,
     dispatch_trade_condition_list,
@@ -317,7 +318,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.4,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -350,7 +351,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
         self.assertGreater(notifier.stop_longs[0][1].rsi, 50)
 
-    def test_requires_oi_to_market_cap_strictly_above_110_percent(self) -> None:
+    def test_requires_oi_to_market_cap_strictly_above_130_percent(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()
         snapshot = {
@@ -358,7 +359,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.1,
+                    "oi_to_market_cap": 1.3,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -368,6 +369,25 @@ class TradeDispatchTests(unittest.TestCase):
 
         self.assertEqual(result.events, ())
         self.assertEqual(notifier.signals, [])
+
+    def test_marks_focus_assets_below_130_percent_as_stop_long(self) -> None:
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        result = scan_trade_conditions(snapshot, lambda _: _long_setup_candles())
+
+        self.assertEqual(result.scans[0].status, STOP_LONG)
+        self.assertEqual(
+            result.scans[0].reasons, ("oi_to_market_cap_not_above_130",)
+        )
 
     def test_does_not_stop_active_long_at_exactly_110_percent(self) -> None:
         store = MemoryStore()
@@ -585,7 +605,7 @@ class TradeDispatchTests(unittest.TestCase):
                 },
                 {
                     "canonical_symbol": "DOGE",
-                    "oi_to_market_cap": 1.2,
+                    "oi_to_market_cap": 1.4,
                     "contracts": [{"venue": "Binance", "symbol": "DOGEUSDT"}],
                 },
             ],
