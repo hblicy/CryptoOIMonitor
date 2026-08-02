@@ -5,6 +5,7 @@ import {
   TRADE_VENUES,
   groupTradeConditionScans,
   sourceHealthSummary,
+  tradeConditionReasons,
   tradeSignalLabel,
   tradeSignalReason,
 } from "./App";
@@ -67,5 +68,18 @@ describe("data source groups", () => {
       exitLong: [scan],
       errors: [],
     });
+  });
+
+  it("shows current condition reasons in Chinese", () => {
+    expect(
+      tradeConditionReasons([
+        "close_below_ema200_exit_buffer",
+        "two_closes_below_ema200",
+        "rsi_not_below_50",
+        "rsi_not_rising",
+      ]),
+    ).toBe(
+      "15m 收盘价低于 EMA200 − 0.5 × ATR；连续两根 15m 收盘价低于 EMA200；RSI(14) 未低于 50；RSI(14) 未回升",
+    );
   });
 });

@@ -46,6 +46,10 @@ export function tradeSignalReason(reason) {
   return reason;
 }
 
+export function tradeConditionReasons(reasons) {
+  return reasons?.map(tradeSignalReason).join("；");
+}
+
 export function groupTradeConditionScans(scans) {
   return {
     canLong: scans.filter((scan) => scan.status === "can_long"),
@@ -317,7 +321,7 @@ function TradeConditionGroup({ title, status, scans }) {
 }
 
 function TradeConditionCard({ scan }) {
-  const reasons = scan.reasons?.map(tradeConditionReason).join("；");
+  const reasons = tradeConditionReasons(scan.reasons);
   return (
     <article className={`trade-signal-card trade-signal-${scan.status}`}>
       <header>
@@ -342,12 +346,6 @@ function TradeConditionCard({ scan }) {
         </>}
     </article>
   );
-}
-
-function tradeConditionReason(reason) {
-  if (reason === "rsi_not_below_50") return "RSI(14) 未低于 50";
-  if (reason === "close_not_above_ema200") return "15m 收盘价未高于 EMA200";
-  return reason;
 }
 
 function formatTradePrice(value) {
