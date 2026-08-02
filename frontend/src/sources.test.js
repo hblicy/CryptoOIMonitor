@@ -51,7 +51,21 @@ describe("data source groups", () => {
     expect(groupTradeConditionScans(scans)).toEqual({
       canLong: [scans[0]],
       stopLong: [scans[1]],
+      exitLong: [],
       errors: [scans[2]],
+    });
+  });
+
+  it("labels and groups forced exits separately", () => {
+    const scan = { canonical_symbol: "KOMA", status: "exit_long" };
+
+    expect(tradeSignalLabel("exit_long")).toBe("必须退出");
+    expect(tradeSignalReason("atr_stop_loss")).toBe("触及 2 × ATR 止损");
+    expect(groupTradeConditionScans([scan])).toEqual({
+      canLong: [],
+      stopLong: [],
+      exitLong: [scan],
+      errors: [],
     });
   });
 });

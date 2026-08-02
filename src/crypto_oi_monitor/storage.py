@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from .trade_dispatch import TradeConditionListState
+from .trade_dispatch import TradeConditionListState, TradeSignalState
 
 
 LOGGER = logging.getLogger(__name__)
@@ -55,10 +55,26 @@ class SnapshotStore:
                 """
                 CREATE TABLE IF NOT EXISTS trade_signal_states (
                     canonical_symbol TEXT PRIMARY KEY,
-                    side TEXT NOT NULL
+                    side TEXT NOT NULL,
+                    entry_price REAL,
+                    stop_loss REAL,
+                    cooldown_until_candle_close_time INTEGER
                 )
                 """
             )
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(trade_signal_states)")
+            }
+            for column, definition in (
+                ("entry_price", "REAL"),
+                ("stop_loss", "REAL"),
+                ("cooldown_until_candle_close_time", "INTEGER"),
+            ):
+                if column not in columns:
+                    connection.execute(
+                        f"ALTER TABLE trade_signal_states ADD COLUMN {column} {definition}"
+                    )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS trade_condition_list_state (
@@ -175,23 +191,65 @@ class SnapshotStore:
                 (canonical_symbol, status),
             )
 
-    def get_trade_signal_state(self, canonical_symbol: str) -> str | None:
+    def get_trade_signal_state(
+        self, canonical_symbol: str
+    ) -> TradeSignalState | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT side FROM trade_signal_states WHERE canonical_symbol = ?",
+                """
+                SELECT side, entry_price, stop_loss, cooldown_until_candle_close_time
+                FROM trade_signal_states
+                WHERE canonical_symbol = ?
+                """,
                 (canonical_symbol,),
             ).fetchone()
-        return None if row is None else str(row[0])
+            if row is None:
+                return None
+            state = TradeSignalState(
+                status=str(row[0]),
+                entry_price=None if row[1] is None else float(row[1]),
+                stop_loss=None if row[2] is None else float(row[2]),
+                cooldown_until_candle_close_time=None if row[3] is None else int(row[3]),
+            )
+            if state.status in {"long", "no_add"} and (
+                state.entry_price is None or state.stop_loss is None
+            ):
+                LOGGER.warning(
+                    "清除缺少入场价或止损价的旧交易信号状态：%s", canonical_symbol
+                )
+                connection.execute(
+                    "DELETE FROM trade_signal_states WHERE canonical_symbol = ?",
+                    (canonical_symbol,),
+                )
+                return None
+        return state
 
-    def set_trade_signal_state(self, canonical_symbol: str, side: str) -> None:
+    def set_trade_signal_state(
+        self, canonical_symbol: str, state: TradeSignalState
+    ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO trade_signal_states (canonical_symbol, side)
-                VALUES (?, ?)
-                ON CONFLICT(canonical_symbol) DO UPDATE SET side = excluded.side
+                INSERT INTO trade_signal_states (
+                    canonical_symbol,
+                    side,
+                    entry_price,
+                    stop_loss,
+                    cooldown_until_candle_close_time
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(canonical_symbol) DO UPDATE SET
+                    side = excluded.side,
+                    entry_price = excluded.entry_price,
+                    stop_loss = excluded.stop_loss,
+                    cooldown_until_candle_close_time = excluded.cooldown_until_candle_close_time
                 """,
-                (canonical_symbol, side),
+                (
+                    canonical_symbol,
+                    state.status,
+                    state.entry_price,
+                    state.stop_loss,
+                    state.cooldown_until_candle_close_time,
+                ),
             )
 
     def clear_trade_signal_state(self, canonical_symbol: str) -> None:

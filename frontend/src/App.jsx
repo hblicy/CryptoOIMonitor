@@ -24,12 +24,22 @@ export function sourceHealthSummary(sources) {
 }
 
 export function tradeSignalLabel(eventType) {
+  if (eventType === "exit_long") return "必须退出";
   if (eventType === "long") return "开多";
   if (eventType === "stop_long") return "停止开多";
   return eventType;
 }
 
 export function tradeSignalReason(reason) {
+  if (reason === "atr_stop_loss") return "触及 2 × ATR 止损";
+  if (reason === "close_below_ema200_exit_buffer") return "15m 收盘价低于 EMA200 − 0.5 × ATR";
+  if (reason === "two_closes_below_ema200") return "连续两根 15m 收盘价低于 EMA200";
+  if (reason === "hourly_close_not_above_ema200") return "1h 收盘价未高于 EMA200";
+  if (reason === "hourly_ema200_not_rising") return "1h EMA200 未上行";
+  if (reason === "close_not_above_ema200_buffer") return "15m 收盘价未高于 EMA200 + 0.25 × ATR";
+  if (reason === "rsi_below_35") return "RSI(14) 低于 35";
+  if (reason === "rsi_not_below_50") return "RSI(14) 未低于 50";
+  if (reason === "rsi_not_rising") return "RSI(14) 未回升";
   if (reason === "oi_to_market_cap_below_110") return "OI / 市值低于 110%";
   if (reason === "rsi_above_50") return "RSI(14) 超过 50";
   if (reason === "close_below_ema200") return "15m 收盘价低于 EMA200";
@@ -40,6 +50,7 @@ export function groupTradeConditionScans(scans) {
   return {
     canLong: scans.filter((scan) => scan.status === "can_long"),
     stopLong: scans.filter((scan) => scan.status === "stop_long"),
+    exitLong: scans.filter((scan) => scan.status === "exit_long"),
     errors: scans.filter((scan) => scan.status === "kline_error"),
   };
 }
@@ -271,12 +282,12 @@ function Coverage({ venues }) {
 }
 
 function TradeConditionPanel({ scans, complete }) {
-  const { canLong, stopLong, errors } = groupTradeConditionScans(scans);
+  const { canLong, stopLong, exitLong, errors } = groupTradeConditionScans(scans);
   return (
     <section className="trade-signal-panel" aria-label="交易条件扫描">
       <header className="trade-signal-heading">
         <strong>交易条件扫描</strong>
-        <span>OI / 市值 &gt; 110%，基于 Binance 15 分钟已收盘 K 线；企业微信仅在状态变化时推送</span>
+        <span>OI / 市值 &gt; 110%；1h 趋势向上；15m 收盘价高于 EMA200 + 0.25 × ATR；RSI 在 35-50 且回升</span>
       </header>
       {!complete
         ? <p className="trade-signal-empty">数据源不完整，本轮未执行交易条件扫描。</p>
@@ -285,6 +296,7 @@ function TradeConditionPanel({ scans, complete }) {
           : <div className="trade-condition-groups">
             <TradeConditionGroup title="可以做多" status="can_long" scans={canLong} />
             <TradeConditionGroup title="停止做多" status="stop_long" scans={stopLong} />
+            <TradeConditionGroup title="必须退出" status="exit_long" scans={exitLong} />
             <TradeConditionGroup title="K 线异常" status="kline_error" scans={errors} />
           </div>}
     </section>
@@ -325,8 +337,8 @@ function TradeConditionCard({ scan }) {
             <div><dt>OI / 市值</dt><dd>{formatRatio(scan.oi_to_market_cap)}</dd></div>
           </dl>
           {scan.status === "can_long"
-            ? <p className="trade-signal-note">满足收盘价高于 EMA200、RSI(14) 小于 50。</p>
-            : <p className="trade-signal-note">停止原因：{reasons}。</p>}
+            ? <p className="trade-signal-note">满足 1h 趋势、15m EMA200 + 0.25 × ATR 与 RSI 回升条件。</p>
+            : <p className="trade-signal-note">{scan.status === "exit_long" ? "必须退出原因" : "停止原因"}：{reasons}。</p>}
         </>}
     </article>
   );

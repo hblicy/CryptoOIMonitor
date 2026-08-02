@@ -9,11 +9,14 @@ from .domain import FOCUS_OI_TO_MARKET_CAP_RATIO
 from .trading import (
     LONG,
     Candle,
+    FIFTEEN_MINUTES_MILLISECONDS,
     REQUIRED_CLOSED_CANDLES,
+    TradeIndicators,
     TradeSetup,
-    current_ema200,
-    current_rsi,
+    entry_reasons,
     evaluate_trade_setup,
+    exit_reasons,
+    trade_indicators,
 )
 
 
@@ -21,7 +24,11 @@ MAX_KLINE_WORKERS = 8
 LEGACY_SHORT_STATE = "short"
 STOP_LONG = "stop_long"
 CAN_LONG = "can_long"
+EXIT_LONG = "exit_long"
 KLINE_ERROR = "kline_error"
+NO_ADD = "no_add"
+REENTRY_COOLDOWN = "reentry_cooldown"
+REENTRY_COOLDOWN_CANDLES = 4
 TRADE_CONDITION_LIST_INTERVAL = timedelta(hours=1)
 
 
@@ -29,6 +36,14 @@ TRADE_CONDITION_LIST_INTERVAL = timedelta(hours=1)
 class TradeSignalDispatchFailure:
     canonical_symbol: str
     message: str
+
+
+@dataclass(frozen=True)
+class TradeSignalState:
+    status: str
+    entry_price: float | None = None
+    stop_loss: float | None = None
+    cooldown_until_candle_close_time: int | None = None
 
 
 @dataclass(frozen=True)
@@ -124,9 +139,13 @@ class TradeConditionListNotifier(Protocol):
 
 
 class TradeSignalStateStore(Protocol):
-    def get_trade_signal_state(self, canonical_symbol: str) -> str | None: ...
+    def get_trade_signal_state(
+        self, canonical_symbol: str
+    ) -> TradeSignalState | None: ...
 
-    def set_trade_signal_state(self, canonical_symbol: str, side: str) -> None: ...
+    def set_trade_signal_state(
+        self, canonical_symbol: str, state: TradeSignalState
+    ) -> None: ...
 
     def clear_trade_signal_state(self, canonical_symbol: str) -> None: ...
 
@@ -139,9 +158,16 @@ class TradeSignalNotifier(Protocol):
     def send_stop_long(
         self,
         comparison: dict[str, Any],
-        rsi: float | None,
-        close: float | None,
-        ema200: float | None,
+        indicators: TradeIndicators | None,
+        reasons: tuple[str, ...],
+    ) -> None: ...
+
+    def send_exit_long(
+        self,
+        comparison: dict[str, Any],
+        indicators: TradeIndicators,
+        state: TradeSignalState,
+        reasons: tuple[str, ...],
     ) -> None: ...
 
 
@@ -198,21 +224,24 @@ def dispatch_trade_signals(
     if not snapshot["complete"]:
         return TradeSignalDispatchResult((), ())
 
-    candidates = []
-    oi_threshold_stops = []
+    candidates: list[tuple[dict[str, Any], TradeSignalState | None]] = []
+    oi_threshold_stops: list[tuple[dict[str, Any], TradeSignalState]] = []
     for comparison in snapshot["comparisons"]:
-        state = store.get_trade_signal_state(comparison["canonical_symbol"])
-        if state == LEGACY_SHORT_STATE:
+        state = _as_trade_signal_state(
+            store.get_trade_signal_state(comparison["canonical_symbol"])
+        )
+        if state is not None and state.status == LEGACY_SHORT_STATE:
             store.clear_trade_signal_state(comparison["canonical_symbol"])
             state = None
         if (
-            state == LONG
+            state is not None
+            and state.status == LONG
             and comparison["oi_to_market_cap"] < FOCUS_OI_TO_MARKET_CAP_RATIO
         ):
             oi_threshold_stops.append((comparison, state))
         elif (
             comparison["oi_to_market_cap"] > FOCUS_OI_TO_MARKET_CAP_RATIO
-            or state == LONG
+            or state is not None
         ):
             candidates.append((comparison, state))
 
@@ -220,11 +249,16 @@ def dispatch_trade_signals(
     details: list[TradeSignalEvent] = []
     for comparison, state in oi_threshold_stops:
         canonical_symbol = comparison["canonical_symbol"]
-        reasons = _stop_long_reasons(
-            state, comparison["oi_to_market_cap"], None, None, None
+        reasons = ("oi_to_market_cap_below_110",)
+        notifier.send_stop_long(comparison, None, reasons)
+        store.set_trade_signal_state(
+            canonical_symbol,
+            TradeSignalState(
+                status=NO_ADD,
+                entry_price=state.entry_price,
+                stop_loss=state.stop_loss,
+            ),
         )
-        notifier.send_stop_long(comparison, None, None, None)
-        store.clear_trade_signal_state(canonical_symbol)
         dispatched.append(STOP_LONG)
         details.append(
             TradeSignalEvent(
@@ -250,38 +284,98 @@ def dispatch_trade_signals(
         candles = candles_by_symbol.get(canonical_symbol)
         if candles is None:
             continue
+        indicators = trade_indicators(candles)
+        if state is not None and state.status == REENTRY_COOLDOWN:
+            if (
+                state.cooldown_until_candle_close_time is not None
+                and indicators.candle_close_time
+                < state.cooldown_until_candle_close_time
+            ):
+                continue
+            store.clear_trade_signal_state(canonical_symbol)
+            state = None
         if state is not None:
-            rsi = current_rsi(candles)
-            close = candles[-1].close
-            ema200 = current_ema200(candles)
-            reasons = _stop_long_reasons(
-                state, comparison["oi_to_market_cap"], rsi, close, ema200
+            forced_exit_reasons = (
+                exit_reasons(candles, indicators, state.stop_loss)
+                if state.stop_loss is not None
+                else ()
             )
-            if reasons:
-                notifier.send_stop_long(comparison, rsi, close, ema200)
-                store.clear_trade_signal_state(canonical_symbol)
+            if forced_exit_reasons:
+                notifier.send_exit_long(
+                    comparison, indicators, state, forced_exit_reasons
+                )
+                store.set_trade_signal_state(
+                    canonical_symbol,
+                    TradeSignalState(
+                        status=REENTRY_COOLDOWN,
+                        cooldown_until_candle_close_time=(
+                            indicators.candle_close_time
+                            + REENTRY_COOLDOWN_CANDLES
+                            * FIFTEEN_MINUTES_MILLISECONDS
+                        ),
+                    ),
+                )
+                dispatched.append(EXIT_LONG)
+                details.append(
+                    TradeSignalEvent(
+                        event_type=EXIT_LONG,
+                        canonical_symbol=canonical_symbol,
+                        candle_close_time=indicators.candle_close_time,
+                        rsi=indicators.rsi,
+                        close=indicators.close,
+                        ema200=indicators.ema200,
+                        oi_to_market_cap=comparison["oi_to_market_cap"],
+                        entry_price=state.entry_price,
+                        stop_loss=state.stop_loss,
+                        atr=indicators.atr,
+                        reasons=forced_exit_reasons,
+                    )
+                )
+                continue
+            reasons = entry_reasons(indicators)
+            if state.status == LONG and reasons:
+                notifier.send_stop_long(comparison, indicators, reasons)
+                store.set_trade_signal_state(
+                    canonical_symbol,
+                    TradeSignalState(
+                        status=NO_ADD,
+                        entry_price=state.entry_price,
+                        stop_loss=state.stop_loss,
+                    ),
+                )
                 dispatched.append(STOP_LONG)
                 details.append(
                     TradeSignalEvent(
                         event_type=STOP_LONG,
                         canonical_symbol=canonical_symbol,
-                        candle_close_time=candles[-1].close_time,
-                        rsi=rsi,
-                        close=close,
-                        ema200=ema200,
+                        candle_close_time=indicators.candle_close_time,
+                        rsi=indicators.rsi,
+                        close=indicators.close,
+                        ema200=indicators.ema200,
                         oi_to_market_cap=comparison["oi_to_market_cap"],
                         reasons=reasons,
                     )
                 )
-            else:
                 continue
+            if state.status == LONG:
+                continue
+            if reasons:
+                continue
+            store.clear_trade_signal_state(canonical_symbol)
         if comparison["oi_to_market_cap"] <= FOCUS_OI_TO_MARKET_CAP_RATIO:
             continue
         signal = evaluate_trade_setup(candles)
         if signal is None:
             continue
         notifier.send_trade_signal(signal, comparison)
-        store.set_trade_signal_state(canonical_symbol, signal.side)
+        store.set_trade_signal_state(
+            canonical_symbol,
+            TradeSignalState(
+                status=signal.side,
+                entry_price=signal.entry_price,
+                stop_loss=signal.stop_loss,
+            ),
+        )
         dispatched.append(signal.side)
         details.append(
             TradeSignalEvent(
@@ -346,6 +440,7 @@ def _load_trade_candles(
             canonical_symbol = comparison["canonical_symbol"]
             try:
                 candles = future.result()
+                trade_indicators(candles)
             except Exception as error:
                 failure = TradeSignalDispatchFailure(
                     canonical_symbol,
@@ -405,43 +500,35 @@ def _binance_symbol(comparison: dict[str, Any]) -> str:
     )
 
 
-def _stop_long_reasons(
-    side: str,
-    oi_to_market_cap: float,
-    rsi: float | None,
-    close: float | None,
-    ema200: float | None,
-) -> tuple[str, ...]:
-    if side == LONG:
-        reasons = []
-        if oi_to_market_cap < FOCUS_OI_TO_MARKET_CAP_RATIO:
-            reasons.append("oi_to_market_cap_below_110")
-        if rsi is not None and rsi > 50:
-            reasons.append("rsi_above_50")
-        if close is not None and ema200 is not None and close < ema200:
-            reasons.append("close_below_ema200")
-        return tuple(reasons)
-    raise ValueError(f"Unsupported trade signal side: {side}")
+def _as_trade_signal_state(
+    state: TradeSignalState | str | None,
+) -> TradeSignalState | None:
+    if state is None or isinstance(state, TradeSignalState):
+        return state
+    if isinstance(state, str):
+        return TradeSignalState(status=state)
+    raise TypeError(f"Unsupported trade signal state: {type(state).__name__}")
 
 
 def _scan_trade_condition(
     comparison: dict[str, Any], candles: list[Candle]
 ) -> TradeConditionScan:
-    rsi = current_rsi(candles)
-    close = candles[-1].close
-    ema200 = current_ema200(candles)
-    reasons = []
-    if rsi >= 50:
-        reasons.append("rsi_not_below_50")
-    if close <= ema200:
-        reasons.append("close_not_above_ema200")
+    indicators = trade_indicators(candles)
+    forced_exit_reasons = exit_reasons(candles, indicators, None)
+    reasons = forced_exit_reasons or entry_reasons(indicators)
     return TradeConditionScan(
-        status=CAN_LONG if not reasons else STOP_LONG,
+        status=(
+            EXIT_LONG
+            if forced_exit_reasons
+            else CAN_LONG
+            if not reasons
+            else STOP_LONG
+        ),
         canonical_symbol=comparison["canonical_symbol"],
-        candle_close_time=candles[-1].close_time,
-        rsi=rsi,
-        close=close,
-        ema200=ema200,
+        candle_close_time=indicators.candle_close_time,
+        rsi=indicators.rsi,
+        close=indicators.close,
+        ema200=indicators.ema200,
         oi_to_market_cap=comparison["oi_to_market_cap"],
         reasons=tuple(reasons),
     )

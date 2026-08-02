@@ -57,12 +57,14 @@ button:disabled { cursor: wait; opacity: .66; }
 .trade-condition-group > header span { color: #91a2b3; font-size: 12px; }
 .trade-condition-can_long > header strong { color: #61db7c; }
 .trade-condition-stop_long > header strong { color: #ff8992; }
+.trade-condition-exit_long > header strong { color: #ff6472; }
 .trade-condition-kline_error > header strong { color: #f5b34c; }
 .trade-condition-list { display: grid; gap: 8px; padding: 8px; }
 .trade-condition-empty { margin: 0; padding: 15px 11px; color: #8193a6; font-size: 12px; }
 .trade-signal-card { min-width: 0; border: 1px solid #33465a; border-radius: 5px; background: #111c27; padding: 9px 13px; }
 .trade-signal-can_long { border-left: 3px solid #50d66b; }
 .trade-signal-stop_long { border-left: 3px solid #ff7681; }
+.trade-signal-exit_long { border-left: 3px solid #ff5263; }
 .trade-signal-kline_error { border-left: 3px solid #f5b34c; }
 .trade-signal-card header { display: flex; align-items: baseline; gap: 9px; }
 .trade-signal-card strong { color: #f1f6fb; font-size: 16px; }

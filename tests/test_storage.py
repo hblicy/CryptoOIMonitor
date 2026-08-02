@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from crypto_oi_monitor.storage import SnapshotStore
-from crypto_oi_monitor.trade_dispatch import TradeConditionListState
+from crypto_oi_monitor.trade_dispatch import TradeConditionListState, TradeSignalState
 
 
 class SnapshotStoreTests(unittest.TestCase):
@@ -26,11 +26,38 @@ class SnapshotStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = SnapshotStore(Path(temp_dir) / "monitor.db")
 
-            store.set_trade_signal_state("ETH", "long")
+            state = TradeSignalState("long", 100, 98)
+            store.set_trade_signal_state("ETH", state)
 
-            self.assertEqual(store.get_trade_signal_state("ETH"), "long")
+            self.assertEqual(store.get_trade_signal_state("ETH"), state)
             store.clear_trade_signal_state("ETH")
             self.assertIsNone(store.get_trade_signal_state("ETH"))
+
+    def test_clears_legacy_long_state_without_exit_parameters(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SnapshotStore(Path(temp_dir) / "monitor.db")
+            connection = store._connect()
+            try:
+                connection.execute(
+                    "INSERT INTO trade_signal_states (canonical_symbol, side) VALUES (?, ?)",
+                    ("ETH", "long"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertLogs("crypto_oi_monitor.storage", level="WARNING"):
+                self.assertIsNone(store.get_trade_signal_state("ETH"))
+            connection = store._connect()
+            try:
+                self.assertIsNone(
+                    connection.execute(
+                        "SELECT 1 FROM trade_signal_states WHERE canonical_symbol = ?",
+                        ("ETH",),
+                    ).fetchone()
+                )
+            finally:
+                connection.close()
 
     def test_persists_trade_condition_list_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -78,14 +105,16 @@ class SnapshotStoreTests(unittest.TestCase):
             store = SnapshotStore(Path(temp_dir) / "monitor.db")
             store.set_alert_status("ETH", "high_risk")
             store.set_alert_status("DOGE", "high_risk")
-            store.set_trade_signal_state("ETH", "long")
-            store.set_trade_signal_state("DOGE", "short")
+            store.set_trade_signal_state("ETH", TradeSignalState("long", 100, 98))
+            store.set_trade_signal_state("DOGE", TradeSignalState("short"))
 
             removed_alerts, removed_trade_signals = store.clear_states_outside({"ETH"})
 
             self.assertEqual((removed_alerts, removed_trade_signals), (1, 1))
             self.assertEqual(store.get_alert_status("ETH"), "high_risk")
-            self.assertEqual(store.get_trade_signal_state("ETH"), "long")
+            self.assertEqual(
+                store.get_trade_signal_state("ETH"), TradeSignalState("long", 100, 98)
+            )
             self.assertIsNone(store.get_alert_status("DOGE"))
             self.assertIsNone(store.get_trade_signal_state("DOGE"))
 

@@ -5,18 +5,22 @@ from types import SimpleNamespace
 
 from crypto_oi_monitor.http_client import DataSourceRequestError
 from crypto_oi_monitor.trade_dispatch import (
+    EXIT_LONG,
+    REENTRY_COOLDOWN,
+    REENTRY_COOLDOWN_CANDLES,
+    TradeSignalState,
     TradeConditionScan,
     dispatch_trade_condition_list,
     dispatch_trade_signals,
     scan_trade_conditions,
 )
-from crypto_oi_monitor.trading import Candle
+from crypto_oi_monitor.trading import Candle, FIFTEEN_MINUTES_MILLISECONDS
 
 
 def _candles(closes: list[float]) -> list[Candle]:
     return [
         Candle(
-            close_time=index,
+            close_time=(index + 1) * 15 * 60 * 1000 - 1,
             high=close + 1,
             low=close - 1,
             close=close,
@@ -51,13 +55,13 @@ def _close_below_ema200_candles() -> list[Candle]:
 
 class MemoryStore:
     def __init__(self) -> None:
-        self.states: dict[str, str] = {}
+        self.states: dict[str, TradeSignalState | str] = {}
 
-    def get_trade_signal_state(self, symbol: str) -> str | None:
+    def get_trade_signal_state(self, symbol: str) -> TradeSignalState | str | None:
         return self.states.get(symbol)
 
-    def set_trade_signal_state(self, symbol: str, side: str) -> None:
-        self.states[symbol] = side
+    def set_trade_signal_state(self, symbol: str, state: TradeSignalState) -> None:
+        self.states[symbol] = state
 
     def clear_trade_signal_state(self, symbol: str) -> None:
         self.states.pop(symbol, None)
@@ -67,12 +71,18 @@ class RecordingNotifier:
     def __init__(self) -> None:
         self.signals = []
         self.stop_longs = []
+        self.exit_longs = []
 
     def send_trade_signal(self, signal, comparison) -> None:
         self.signals.append((signal.side, comparison["canonical_symbol"]))
 
-    def send_stop_long(self, comparison, rsi, close, ema200) -> None:
-        self.stop_longs.append((comparison["canonical_symbol"], rsi, close, ema200))
+    def send_stop_long(self, comparison, indicators, reasons) -> None:
+        self.stop_longs.append((comparison["canonical_symbol"], indicators, reasons))
+
+    def send_exit_long(self, comparison, indicators, state, reasons) -> None:
+        self.exit_longs.append(
+            (comparison["canonical_symbol"], indicators.close, state.stop_loss)
+        )
 
 
 class ConditionListStore:
@@ -112,6 +122,45 @@ def _condition_scan(symbol: str, status: str) -> TradeConditionScan:
 
 
 class TradeDispatchTests(unittest.TestCase):
+    def test_requires_exit_when_an_active_long_hits_its_atr_stop(self) -> None:
+        store = MemoryStore()
+        store.states["PEPE"] = TradeSignalState(
+            status="long",
+            entry_price=100,
+            stop_loss=98,
+        )
+        notifier = RecordingNotifier()
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+        candles = _long_setup_candles()
+        candles[-1] = Candle(
+            close_time=candles[-1].close_time,
+            high=99,
+            low=97,
+            close=97.5,
+        )
+
+        result = dispatch_trade_signals(snapshot, lambda _: candles, store, notifier)
+
+        self.assertEqual(result.events, (EXIT_LONG,))
+        self.assertIn("atr_stop_loss", result.details[0].reasons)
+        self.assertEqual(notifier.exit_longs, [("PEPE", 97.5, 98)])
+        state = store.get_trade_signal_state("PEPE")
+        self.assertEqual(state.status, REENTRY_COOLDOWN)
+        self.assertEqual(
+            state.cooldown_until_candle_close_time,
+            candles[-1].close_time
+            + REENTRY_COOLDOWN_CANDLES * FIFTEEN_MINUTES_MILLISECONDS,
+        )
+
     def test_sends_current_lists_when_new_condition_symbols_appear(self) -> None:
         now = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
         store = ConditionListStore(
@@ -250,16 +299,16 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(first.events, ("long",))
         self.assertEqual(first.details[0].event_type, "long")
         self.assertEqual(first.details[0].canonical_symbol, "PEPE")
-        self.assertEqual(first.details[0].candle_close_time, 1260)
+        self.assertEqual(first.details[0].candle_close_time, 1_134_899_999)
         self.assertEqual(first.details[0].reasons, ())
         self.assertEqual(repeated.events, ())
         self.assertEqual(stopped.events, ("stop_long",))
         self.assertEqual(stopped.details[0].event_type, "stop_long")
-        self.assertEqual(stopped.details[0].reasons, ("rsi_above_50",))
+        self.assertEqual(stopped.details[0].reasons, ("rsi_not_below_50",))
         self.assertEqual(reentered.events, ("long",))
         self.assertEqual(notifier.signals, [("long", "PEPE"), ("long", "PEPE")])
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
-        self.assertGreater(notifier.stop_longs[0][1], 50)
+        self.assertGreater(notifier.stop_longs[0][1].rsi, 50)
 
     def test_requires_oi_to_market_cap_strictly_above_110_percent(self) -> None:
         store = MemoryStore()
@@ -282,7 +331,7 @@ class TradeDispatchTests(unittest.TestCase):
 
     def test_does_not_stop_active_long_at_exactly_110_percent(self) -> None:
         store = MemoryStore()
-        store.states["PEPE"] = "long"
+        store.states["PEPE"] = TradeSignalState("long", 100, 98)
         notifier = RecordingNotifier()
         snapshot = {
             "complete": True,
@@ -301,7 +350,7 @@ class TradeDispatchTests(unittest.TestCase):
 
         self.assertEqual(result.events, ())
         self.assertEqual(notifier.stop_longs, [])
-        self.assertEqual(store.states["PEPE"], "long")
+        self.assertEqual(store.states["PEPE"].status, "long")
 
     def test_scans_all_eligible_assets_into_can_long_and_stop_long_groups(self) -> None:
         store = MemoryStore()
@@ -423,7 +472,7 @@ class TradeDispatchTests(unittest.TestCase):
             ("oi_to_market_cap_below_110",),
         )
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
-        self.assertNotIn("PEPE", store.states)
+        self.assertEqual(store.states["PEPE"].status, "no_add")
 
     def test_stops_active_long_when_oi_to_market_cap_is_below_110_percent(self) -> None:
         store = MemoryStore()
@@ -449,7 +498,7 @@ class TradeDispatchTests(unittest.TestCase):
             result.details[0].reasons, ("oi_to_market_cap_below_110",)
         )
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
-        self.assertNotIn("PEPE", store.states)
+        self.assertEqual(store.states["PEPE"].status, "no_add")
 
     def test_stops_active_long_for_oi_threshold_when_kline_load_fails(self) -> None:
         store = MemoryStore()
@@ -480,7 +529,7 @@ class TradeDispatchTests(unittest.TestCase):
         )
         self.assertIsNone(result.details[0].candle_close_time)
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
-        self.assertNotIn("PEPE", store.states)
+        self.assertEqual(store.states["PEPE"].status, "no_add")
 
     def test_sends_oi_threshold_stop_before_loading_other_trade_candles(self) -> None:
         store = MemoryStore()
@@ -503,8 +552,8 @@ class TradeDispatchTests(unittest.TestCase):
         }
 
         def load(symbol: str):
-            self.assertEqual(notifier.stop_longs, [("PEPE", None, None, None)])
-            self.assertNotIn("PEPE", store.states)
+            self.assertEqual(notifier.stop_longs, [("PEPE", None, ("oi_to_market_cap_below_110",))])
+            self.assertEqual(store.states["PEPE"].status, "no_add")
             self.assertEqual(symbol, "DOGEUSDT")
             return _candles([100] * 1001)
 
@@ -513,7 +562,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.events, ("stop_long",))
         self.assertEqual(result.failures, ())
 
-    def test_does_not_stop_active_long_when_rsi_is_exactly_50(self) -> None:
+    def test_stops_active_long_when_rsi_is_exactly_50(self) -> None:
         store = MemoryStore()
         store.states["PEPE"] = "long"
         notifier = RecordingNotifier()
@@ -531,10 +580,10 @@ class TradeDispatchTests(unittest.TestCase):
 
         result = dispatch_trade_signals(snapshot, lambda _: candles, store, notifier)
 
-        self.assertEqual(result.events, ())
+        self.assertEqual(result.events, ("stop_long",))
         self.assertEqual(notifier.signals, [])
-        self.assertEqual(notifier.stop_longs, [])
-        self.assertEqual(store.states["PEPE"], "long")
+        self.assertIn("rsi_not_below_50", notifier.stop_longs[0][2])
+        self.assertEqual(store.states["PEPE"].status, "no_add")
 
     def test_stops_active_long_when_close_is_below_ema200(self) -> None:
         store = MemoryStore()
@@ -556,11 +605,16 @@ class TradeDispatchTests(unittest.TestCase):
         )
 
         self.assertEqual(result.events, ("stop_long",))
-        self.assertEqual(result.details[0].reasons, ("close_below_ema200",))
+        self.assertIn(
+            "close_not_above_ema200_buffer", result.details[0].reasons
+        )
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
-        self.assertLess(notifier.stop_longs[0][1], 50)
-        self.assertLess(notifier.stop_longs[0][2], notifier.stop_longs[0][3])
-        self.assertNotIn("PEPE", store.states)
+        self.assertLess(notifier.stop_longs[0][1].rsi, 50)
+        self.assertLess(
+            notifier.stop_longs[0][1].close,
+            notifier.stop_longs[0][1].ema200,
+        )
+        self.assertEqual(store.states["PEPE"].status, "no_add")
 
     def test_clears_legacy_short_state_then_scans_and_evaluates_long(self) -> None:
         store = MemoryStore()
@@ -588,7 +642,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.failures, ())
         self.assertEqual(notifier.signals, [("long", "PEPE")])
         self.assertEqual(result.scans[0].status, "can_long")
-        self.assertEqual(store.states["PEPE"], "long")
+        self.assertEqual(store.states["PEPE"].status, "long")
 
     def test_skips_short_history_and_continues_with_other_symbols(self) -> None:
         store = MemoryStore()
@@ -621,7 +675,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.events, ("long",))
         self.assertEqual(notifier.signals, [("long", "PEPE")])
         self.assertEqual(result.failures[0].canonical_symbol, "NEW")
-        self.assertIn("1001 根", result.failures[0].message)
+        self.assertIn("1001", result.failures[0].message)
 
     def test_loads_trade_signal_candidates_concurrently(self) -> None:
         store = MemoryStore()

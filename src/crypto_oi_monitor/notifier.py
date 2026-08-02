@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from .alerts import ENTERED_HIGH_RISK, RECOVERED
-from .domain import FOCUS_OI_TO_MARKET_CAP_RATIO
-from .trading import LONG, TradeSetup
+from .trade_dispatch import TradeSignalState
+from .trading import LONG, TradeIndicators, TradeSetup
 
 
 class WeComHttpClient(Protocol):
@@ -40,15 +40,35 @@ class WeComNotifier:
     def send_stop_long(
         self,
         comparison: dict[str, Any],
-        rsi: float | None,
-        close: float | None,
-        ema200: float | None,
+        indicators: TradeIndicators | None,
+        reasons: tuple[str, ...],
     ) -> None:
         response = self.client.post_json(
             self.webhook_url,
             {
                 "msgtype": "text",
-                "text": {"content": _stop_long_message(comparison, rsi, close, ema200)},
+                "text": {"content": _stop_long_message(comparison, indicators, reasons)},
+            },
+        )
+        if response["errcode"] != 0:
+            raise RuntimeError(f"WeCom webhook rejected message: {response}")
+
+    def send_exit_long(
+        self,
+        comparison: dict[str, Any],
+        indicators: TradeIndicators,
+        state: TradeSignalState,
+        reasons: tuple[str, ...],
+    ) -> None:
+        response = self.client.post_json(
+            self.webhook_url,
+            {
+                "msgtype": "text",
+                "text": {
+                    "content": _exit_long_message(
+                        comparison, indicators, state, reasons
+                    )
+                },
             },
         )
         if response["errcode"] != 0:
@@ -102,10 +122,13 @@ def _trade_message(signal: TradeSetup, comparison: dict[str, Any]) -> str:
         f"周期：15m（已收盘）\n"
         f"参考入场：{signal.entry_price:.8f}\n"
         f"止损：{signal.stop_loss:.8f}（2 × ATR(14)）\n"
-        f"停止开多条件：OI / 市值低于 110%、RSI(14) 超过 50 或 15m 收盘价低于 EMA200\n"
+        "做多条件：OI / 市值 > 110%；1h 趋势向上；15m 收盘价高于 EMA200 + 0.25 × ATR；"
+        "RSI(14) 在 35-50 且回升\n"
+        "风险规则：亏损不补仓；触及止损或 EMA 结构退出条件时必须退出。\n"
         f"杠杆参考：2-3倍\n"
         f"RSI(14)：{signal.rsi:.2f}\n"
         f"EMA200：{signal.ema200:.8f}\n"
+        f"1h EMA200：{signal.hourly_ema200:.8f}\n"
         f"ATR(14)：{signal.atr:.8f}\n"
         f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%"
     )
@@ -126,26 +149,17 @@ def _trade_condition_list_message(
 
 def _stop_long_message(
     comparison: dict[str, Any],
-    rsi: float | None,
-    close: float | None,
-    ema200: float | None,
+    indicators: TradeIndicators | None,
+    reasons: tuple[str, ...],
 ) -> str:
-    reasons = []
-    if comparison["oi_to_market_cap"] < FOCUS_OI_TO_MARKET_CAP_RATIO:
-        reasons.append("OI / 市值已低于 110%")
-    if rsi is not None and rsi > 50:
-        reasons.append("RSI(14) 已超过 50")
-    if close is not None and ema200 is not None and close < ema200:
-        reasons.append("15m 收盘价已低于 EMA200")
     if not reasons:
         raise ValueError("Stop-long message requires a stop condition")
-    kline_metrics = ""
-    if rsi is not None and close is not None and ema200 is not None:
+    if indicators is not None:
         period = "周期：15m（已收盘）\n"
         kline_metrics = (
-            f"RSI(14)：{rsi:.2f}\n"
-            f"收盘价：{close:.8f}\n"
-            f"EMA200：{ema200:.8f}\n"
+            f"RSI(14)：{indicators.rsi:.2f}\n"
+            f"收盘价：{indicators.close:.8f}\n"
+            f"EMA200：{indicators.ema200:.8f}\n"
         )
     else:
         period = "周期：不适用（按 OI / 市值触发）\n"
@@ -155,6 +169,47 @@ def _stop_long_message(
         f"币种：{comparison['canonical_symbol']}\n"
         f"{period}"
         f"{kline_metrics}"
-        f"原因：{'；'.join(reasons)}，请勿继续开多。\n"
+        f"原因：{'；'.join(_reason_text(reason) for reason in reasons)}，请勿继续开多或补仓。\n"
         f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%"
     )
+
+
+def _exit_long_message(
+    comparison: dict[str, Any],
+    indicators: TradeIndicators,
+    state: TradeSignalState,
+    reasons: tuple[str, ...],
+) -> str:
+    if state.entry_price is None or state.stop_loss is None:
+        raise ValueError("Exit-long message requires entry and stop-loss prices")
+    return (
+        "【交易信号：必须退出】\n"
+        f"币种：{comparison['canonical_symbol']}\n"
+        "周期：15m（已收盘）\n"
+        f"参考入场：{state.entry_price:.8f}\n"
+        f"止损：{state.stop_loss:.8f}\n"
+        f"收盘价：{indicators.close:.8f}\n"
+        f"EMA200：{indicators.ema200:.8f}\n"
+        f"原因：{'；'.join(_reason_text(reason) for reason in reasons)}。请执行退出，不要补仓。\n"
+        "重新开仓：至少等待 4 根 15m K 线，并重新满足完整做多条件。\n"
+        f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%"
+    )
+
+
+def _reason_text(reason: str) -> str:
+    labels = {
+        "oi_to_market_cap_below_110": "OI / 市值已低于 110%",
+        "hourly_close_not_above_ema200": "1h 收盘价未高于 EMA200",
+        "hourly_ema200_not_rising": "1h EMA200 未上行",
+        "close_not_above_ema200_buffer": "15m 收盘价未高于 EMA200 + 0.25 × ATR",
+        "rsi_below_35": "RSI(14) 低于 35",
+        "rsi_not_below_50": "RSI(14) 未低于 50",
+        "rsi_not_rising": "RSI(14) 未回升",
+        "atr_stop_loss": "已触及 2 × ATR 止损",
+        "close_below_ema200_exit_buffer": "15m 收盘价低于 EMA200 − 0.5 × ATR",
+        "two_closes_below_ema200": "连续两根 15m 收盘价低于 EMA200",
+    }
+    try:
+        return labels[reason]
+    except KeyError as error:
+        raise ValueError(f"Unsupported trade reason: {reason}") from error
