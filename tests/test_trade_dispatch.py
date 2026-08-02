@@ -100,13 +100,27 @@ class ConditionListNotifier:
     def __init__(self) -> None:
         self.lists = []
 
-    def send_trade_condition_list(self, can_long, stop_long, periodic) -> None:
-        self.lists.append((can_long, stop_long, periodic))
+    def send_trade_condition_list(
+        self, can_long, stop_long, exit_long, periodic
+    ) -> None:
+        self.lists.append((can_long, stop_long, exit_long, periodic))
 
 
 class FailingConditionListNotifier:
-    def send_trade_condition_list(self, can_long, stop_long, periodic) -> None:
+    def send_trade_condition_list(
+        self, can_long, stop_long, exit_long, periodic
+    ) -> None:
         raise RuntimeError("WeCom failed")
+
+
+class ExitConditionListNotifier:
+    def __init__(self) -> None:
+        self.lists = []
+
+    def send_trade_condition_list(
+        self, can_long, stop_long, exit_long=(), periodic=False
+    ) -> None:
+        self.lists.append((can_long, stop_long, exit_long, periodic))
 
 
 def _condition_scan(symbol: str, status: str) -> TradeConditionScan:
@@ -167,6 +181,7 @@ class TradeDispatchTests(unittest.TestCase):
             SimpleNamespace(
                 can_long=("AKE",),
                 stop_long=("ON",),
+                exit_long=(),
                 last_sent_at=now - timedelta(minutes=5),
             )
         )
@@ -187,11 +202,32 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result, "updated")
         self.assertEqual(
             notifier.lists,
-            [(("AKE", "BULLA"), ("ESPORTS", "ON"), False)],
+            [(("AKE", "BULLA"), ("ESPORTS", "ON"), (), False)],
         )
         self.assertEqual(store.state.can_long, ("AKE", "BULLA"))
         self.assertEqual(store.state.stop_long, ("ESPORTS", "ON"))
+        self.assertEqual(store.state.exit_long, ())
         self.assertEqual(store.state.last_sent_at, now)
+
+    def test_sends_must_exit_symbols_when_they_first_appear(self) -> None:
+        now = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+        store = ConditionListStore(
+            SimpleNamespace(
+                can_long=(),
+                stop_long=(),
+                exit_long=(),
+                last_sent_at=now - timedelta(minutes=5),
+            )
+        )
+        notifier = ExitConditionListNotifier()
+
+        result = dispatch_trade_condition_list(
+            (_condition_scan("KOMA", "exit_long"),), store, notifier, now
+        )
+
+        self.assertEqual(result, "updated")
+        self.assertEqual(notifier.lists, [((), (), ("KOMA",), False)])
+        self.assertEqual(store.state.exit_long, ("KOMA",))
 
     def test_persists_removals_without_sending_before_one_hour(self) -> None:
         now = datetime(2026, 8, 1, 0, 30, tzinfo=timezone.utc)
@@ -200,6 +236,7 @@ class TradeDispatchTests(unittest.TestCase):
             SimpleNamespace(
                 can_long=("AKE", "BULLA"),
                 stop_long=("ON",),
+                exit_long=(),
                 last_sent_at=last_sent_at,
             )
         )
@@ -219,6 +256,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(notifier.lists, [])
         self.assertEqual(store.state.can_long, ("AKE",))
         self.assertEqual(store.state.stop_long, ("ON",))
+        self.assertEqual(store.state.exit_long, ())
         self.assertEqual(store.state.last_sent_at, last_sent_at)
 
     def test_sends_current_lists_every_hour_without_new_symbols(self) -> None:
@@ -227,6 +265,7 @@ class TradeDispatchTests(unittest.TestCase):
             SimpleNamespace(
                 can_long=("AKE",),
                 stop_long=("ON",),
+                exit_long=(),
                 last_sent_at=now - timedelta(hours=1),
             )
         )
@@ -243,7 +282,7 @@ class TradeDispatchTests(unittest.TestCase):
         )
 
         self.assertEqual(result, "periodic")
-        self.assertEqual(notifier.lists, [(("AKE",), ("ON",), True)])
+        self.assertEqual(notifier.lists, [(("AKE",), ("ON",), (), True)])
         self.assertEqual(store.state.last_sent_at, now)
 
     def test_does_not_update_list_state_when_notification_fails(self) -> None:
@@ -251,6 +290,7 @@ class TradeDispatchTests(unittest.TestCase):
         previous_state = SimpleNamespace(
             can_long=("AKE",),
             stop_long=("ON",),
+            exit_long=(),
             last_sent_at=now - timedelta(minutes=5),
         )
         store = ConditionListStore(previous_state)

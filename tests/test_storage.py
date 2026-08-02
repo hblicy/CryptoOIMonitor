@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -10,6 +11,40 @@ from crypto_oi_monitor.trade_dispatch import TradeConditionListState, TradeSigna
 
 
 class SnapshotStoreTests(unittest.TestCase):
+    def test_migrates_existing_condition_list_state_with_empty_must_exit_group(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "monitor.db"
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE trade_condition_list_state (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        can_long_symbols TEXT NOT NULL,
+                        stop_long_symbols TEXT NOT NULL,
+                        last_sent_at TEXT
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO trade_condition_list_state (
+                        id, can_long_symbols, stop_long_symbols, last_sent_at
+                    ) VALUES (1, '[\"AKE\"]', '[\"ON\"]', NULL)
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            state = SnapshotStore(database_path).get_trade_condition_list_state()
+
+            self.assertEqual(state.can_long, ("AKE",))
+            self.assertEqual(state.stop_long, ("ON",))
+            self.assertEqual(state.exit_long, ())
+
     def test_persists_latest_snapshot_and_alert_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = SnapshotStore(Path(temp_dir) / "monitor.db")
@@ -67,6 +102,7 @@ class SnapshotStoreTests(unittest.TestCase):
                 TradeConditionListState(
                     ("AKE",),
                     ("ON",),
+                    ("KOMA",),
                     datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc),
                 )
             )
@@ -75,6 +111,7 @@ class SnapshotStoreTests(unittest.TestCase):
 
             self.assertEqual(state.can_long, ("AKE",))
             self.assertEqual(state.stop_long, ("ON",))
+            self.assertEqual(state.exit_long, ("KOMA",))
             self.assertEqual(
                 state.last_sent_at,
                 datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc),
@@ -89,6 +126,7 @@ class SnapshotStoreTests(unittest.TestCase):
                 TradeConditionListState(
                     ("AKE", "BULLA"),
                     ("BULLA", "ON"),
+                    ("BULLA",),
                     datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc),
                 )
             )
@@ -96,9 +134,10 @@ class SnapshotStoreTests(unittest.TestCase):
             removed = store.clear_trade_condition_list_state_outside({"AKE", "ON"})
             state = store.get_trade_condition_list_state()
 
-            self.assertEqual(removed, 2)
+            self.assertEqual(removed, 3)
             self.assertEqual(state.can_long, ("AKE",))
             self.assertEqual(state.stop_long, ("ON",))
+            self.assertEqual(state.exit_long, ())
 
     def test_clears_alert_and_trade_states_outside_active_comparisons(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

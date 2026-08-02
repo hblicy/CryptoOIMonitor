@@ -120,6 +120,7 @@ class TradeConditionScanResult:
 class TradeConditionListState:
     can_long: tuple[str, ...]
     stop_long: tuple[str, ...]
+    exit_long: tuple[str, ...]
     last_sent_at: datetime | None
 
 
@@ -134,6 +135,7 @@ class TradeConditionListNotifier(Protocol):
         self,
         can_long: tuple[str, ...],
         stop_long: tuple[str, ...],
+        exit_long: tuple[str, ...],
         periodic: bool,
     ) -> None: ...
 
@@ -195,10 +197,20 @@ def dispatch_trade_condition_list(
             }
         )
     )
+    exit_long = tuple(
+        sorted(
+            {
+                scan.canonical_symbol
+                for scan in scans
+                if scan.status == EXIT_LONG
+            }
+        )
+    )
     previous = store.get_trade_condition_list_state()
     has_new_symbols = bool(
         set(can_long) - set(previous.can_long)
         or set(stop_long) - set(previous.stop_long)
+        or set(exit_long) - set(previous.exit_long)
     )
     periodic = (
         previous.last_sent_at is None
@@ -207,10 +219,12 @@ def dispatch_trade_condition_list(
     event = "updated" if has_new_symbols else "periodic" if periodic else None
     last_sent_at = previous.last_sent_at
     if event is not None:
-        notifier.send_trade_condition_list(can_long, stop_long, event == "periodic")
+        notifier.send_trade_condition_list(
+            can_long, stop_long, exit_long, event == "periodic"
+        )
         last_sent_at = now
     store.set_trade_condition_list_state(
-        TradeConditionListState(can_long, stop_long, last_sent_at)
+        TradeConditionListState(can_long, stop_long, exit_long, last_sent_at)
     )
     return event
 

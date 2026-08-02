@@ -81,10 +81,22 @@ class SnapshotStore:
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     can_long_symbols TEXT NOT NULL,
                     stop_long_symbols TEXT NOT NULL,
+                    exit_long_symbols TEXT NOT NULL DEFAULT '[]',
                     last_sent_at TEXT
                 )
                 """
             )
+            condition_list_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(trade_condition_list_state)"
+                )
+            }
+            if "exit_long_symbols" not in condition_list_columns:
+                connection.execute(
+                    "ALTER TABLE trade_condition_list_state "
+                    "ADD COLUMN exit_long_symbols TEXT NOT NULL DEFAULT '[]'"
+                )
 
     def save_snapshot(self, snapshot: dict[str, Any]) -> None:
         self._protect_disk_space()
@@ -263,17 +275,18 @@ class SnapshotStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT can_long_symbols, stop_long_symbols, last_sent_at
+                SELECT can_long_symbols, stop_long_symbols, exit_long_symbols, last_sent_at
                 FROM trade_condition_list_state
                 WHERE id = 1
                 """
             ).fetchone()
         if row is None:
-            return TradeConditionListState((), (), None)
+            return TradeConditionListState((), (), (), None)
         return TradeConditionListState(
             tuple(json.loads(row[0])),
             tuple(json.loads(row[1])),
-            None if row[2] is None else datetime.fromisoformat(row[2]),
+            tuple(json.loads(row[2])),
+            None if row[3] is None else datetime.fromisoformat(row[3]),
         )
 
     def set_trade_condition_list_state(self, state: TradeConditionListState) -> None:
@@ -281,16 +294,18 @@ class SnapshotStore:
             connection.execute(
                 """
                 INSERT INTO trade_condition_list_state (
-                    id, can_long_symbols, stop_long_symbols, last_sent_at
-                ) VALUES (1, ?, ?, ?)
+                    id, can_long_symbols, stop_long_symbols, exit_long_symbols, last_sent_at
+                ) VALUES (1, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     can_long_symbols = excluded.can_long_symbols,
                     stop_long_symbols = excluded.stop_long_symbols,
+                    exit_long_symbols = excluded.exit_long_symbols,
                     last_sent_at = excluded.last_sent_at
                 """,
                 (
                     json.dumps(state.can_long, separators=(",", ":")),
                     json.dumps(state.stop_long, separators=(",", ":")),
+                    json.dumps(state.exit_long, separators=(",", ":")),
                     None if state.last_sent_at is None else state.last_sent_at.isoformat(),
                 ),
             )
@@ -327,14 +342,22 @@ class SnapshotStore:
             for symbol in previous_list_state.stop_long
             if symbol in active_assets
         )
+        exit_long = tuple(
+            symbol
+            for symbol in previous_list_state.exit_long
+            if symbol in active_assets
+        )
         removed_condition_list_symbols = len(previous_list_state.can_long) - len(
             can_long
-        ) + len(previous_list_state.stop_long) - len(stop_long)
+        ) + len(previous_list_state.stop_long) - len(stop_long) + len(
+            previous_list_state.exit_long
+        ) - len(exit_long)
         if removed_condition_list_symbols:
             self.set_trade_condition_list_state(
                 TradeConditionListState(
                     can_long,
                     stop_long,
+                    exit_long,
                     previous_list_state.last_sent_at,
                 )
             )
