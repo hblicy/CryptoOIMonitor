@@ -230,7 +230,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(notifier.lists, [((), (), ("KOMA",), False)])
         self.assertEqual(store.state.exit_long, ("KOMA",))
 
-    def test_persists_removals_without_sending_before_one_hour(self) -> None:
+    def test_keeps_last_notified_list_when_removals_are_not_sent(self) -> None:
         now = datetime(2026, 8, 1, 0, 30, tzinfo=timezone.utc)
         last_sent_at = now - timedelta(minutes=30)
         store = ConditionListStore(
@@ -255,10 +255,48 @@ class TradeDispatchTests(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertEqual(notifier.lists, [])
-        self.assertEqual(store.state.can_long, ("AKE",))
+        self.assertEqual(store.state.can_long, ("AKE", "BULLA"))
         self.assertEqual(store.state.stop_long, ("ON",))
         self.assertEqual(store.state.exit_long, ())
         self.assertEqual(store.state.last_sent_at, last_sent_at)
+
+    def test_does_not_repush_when_a_symbol_returns_before_periodic_notification(
+        self,
+    ) -> None:
+        now = datetime(2026, 8, 1, 0, 30, tzinfo=timezone.utc)
+        store = ConditionListStore(
+            SimpleNamespace(
+                can_long=("AKE", "BULLA"),
+                stop_long=("ON",),
+                exit_long=(),
+                last_sent_at=now - timedelta(minutes=30),
+            )
+        )
+        notifier = ConditionListNotifier()
+
+        removed = dispatch_trade_condition_list(
+            (
+                _condition_scan("AKE", "can_long"),
+                _condition_scan("ON", "stop_long"),
+            ),
+            store,
+            notifier,
+            now,
+        )
+        returned = dispatch_trade_condition_list(
+            (
+                _condition_scan("AKE", "can_long"),
+                _condition_scan("BULLA", "can_long"),
+                _condition_scan("ON", "stop_long"),
+            ),
+            store,
+            notifier,
+            now + timedelta(minutes=2),
+        )
+
+        self.assertIsNone(removed)
+        self.assertIsNone(returned)
+        self.assertEqual(notifier.lists, [])
 
     def test_sends_current_lists_every_hour_without_new_symbols(self) -> None:
         now = datetime(2026, 8, 1, 1, 0, tzinfo=timezone.utc)

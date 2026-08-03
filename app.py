@@ -159,19 +159,11 @@ class MonitorApplication:
                 removed_alerts, removed_trade_signals = self.store.clear_states_outside(
                     active_assets
                 )
-                removed_condition_list_symbols = (
-                    self.store.clear_trade_condition_list_state_outside(active_assets)
-                )
-                if (
-                    removed_alerts
-                    or removed_trade_signals
-                    or removed_condition_list_symbols
-                ):
+                if removed_alerts or removed_trade_signals:
                     LOGGER.info(
-                        "清除不在当前比较范围内的状态：%s 个关注提醒，%s 个交易信号，%s 个交易条件列表币种",
+                        "清除不在当前比较范围内的状态：%s 个关注提醒，%s 个交易信号",
                         removed_alerts,
                         removed_trade_signals,
-                        removed_condition_list_symbols,
                     )
             if self.notifier is None:
                 snapshot["notification"] = {

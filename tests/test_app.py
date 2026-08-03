@@ -34,11 +34,6 @@ class FakeStore:
         self.active_assets = active_assets
         return 0, 0
 
-    def clear_trade_condition_list_state_outside(self, active_assets) -> None:
-        self.condition_list_active_assets = active_assets
-        return 0
-
-
 class TradeSignalOnlyNotifier:
     def send(self, event, comparison) -> None:
         raise AssertionError("不应发送 OI 埋伏候选提醒")

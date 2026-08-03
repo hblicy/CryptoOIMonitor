@@ -329,36 +329,3 @@ class SnapshotStore:
                     parameters,
                 ).rowcount
         return removed_alerts, removed_trade_signals
-
-    def clear_trade_condition_list_state_outside(self, active_assets: set[str]) -> int:
-        previous_list_state = self.get_trade_condition_list_state()
-        can_long = tuple(
-            symbol
-            for symbol in previous_list_state.can_long
-            if symbol in active_assets
-        )
-        stop_long = tuple(
-            symbol
-            for symbol in previous_list_state.stop_long
-            if symbol in active_assets
-        )
-        exit_long = tuple(
-            symbol
-            for symbol in previous_list_state.exit_long
-            if symbol in active_assets
-        )
-        removed_condition_list_symbols = len(previous_list_state.can_long) - len(
-            can_long
-        ) + len(previous_list_state.stop_long) - len(stop_long) + len(
-            previous_list_state.exit_long
-        ) - len(exit_long)
-        if removed_condition_list_symbols:
-            self.set_trade_condition_list_state(
-                TradeConditionListState(
-                    can_long,
-                    stop_long,
-                    exit_long,
-                    previous_list_state.last_sent_at,
-                )
-            )
-        return removed_condition_list_symbols

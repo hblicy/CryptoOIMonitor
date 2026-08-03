@@ -220,15 +220,13 @@ def dispatch_trade_condition_list(
         or now - previous.last_sent_at >= TRADE_CONDITION_LIST_INTERVAL
     )
     event = "updated" if has_new_symbols else "periodic" if periodic else None
-    last_sent_at = previous.last_sent_at
     if event is not None:
         notifier.send_trade_condition_list(
             can_long, stop_long, exit_long, event == "periodic"
         )
-        last_sent_at = now
-    store.set_trade_condition_list_state(
-        TradeConditionListState(can_long, stop_long, exit_long, last_sent_at)
-    )
+        store.set_trade_condition_list_state(
+            TradeConditionListState(can_long, stop_long, exit_long, now)
+        )
     return event
 
 
