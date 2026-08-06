@@ -366,7 +366,7 @@ class CoinMarketCapMarketCapTests(unittest.TestCase):
         self.assertEqual(refreshed.unmapped_candidates[0].price_usd, 101)
         self.assertEqual(refreshed.unmapped_candidates[0].price_difference_percent, 1)
 
-    def test_uses_configured_cmc_id_override_for_an_ambiguous_symbol(self) -> None:
+    def test_uses_configured_cmc_id_override_for_non_alphanumeric_symbol(self) -> None:
         class FakeClient:
             def get_json(self, url: str, params: dict[str, str]):
                 if url == CMC_ID_MAP_URL:
@@ -374,8 +374,8 @@ class CoinMarketCapMarketCapTests(unittest.TestCase):
                 return {
                     "data": [
                         {
-                            "id": 1,
-                            "symbol": "AAA",
+                            "id": 39671,
+                            "symbol": "龙虾",
                             "quote": {"USD": {"market_cap": 1_000}},
                         }
                     ]
@@ -385,10 +385,10 @@ class CoinMarketCapMarketCapTests(unittest.TestCase):
                 raise AssertionError(message)
 
         result = fetch_market_caps(
-            FakeClient(), {"AAA"}, id_overrides={"AAA": "1"}
+            FakeClient(), {"龙虾"}, id_overrides={"龙虾": "39671"}
         )
 
-        self.assertEqual(result.market_caps["AAA"].market_cap_id, "1")
+        self.assertEqual(result.market_caps["龙虾"].market_cap_id, "39671")
         self.assertEqual(result.unmapped_assets, ())
 
     def test_logs_an_unusable_configured_cmc_id_override(self) -> None:
@@ -447,6 +447,89 @@ class CoinMarketCapMarketCapTests(unittest.TestCase):
     def test_rejects_invalid_cmc_id_overrides(self) -> None:
         with self.assertRaisesRegex(ValueError, "ASSET:CMC_ID"):
             parse_cmc_id_overrides("BTC=1")
+
+    def test_skips_non_alphanumeric_symbol_without_failing_valid_assets(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, str]]] = []
+
+            def get_json(self, url: str, params: dict[str, str]):
+                self.calls.append((url, params))
+                if url == CMC_ID_MAP_URL:
+                    return {"data": [{"id": 1027, "symbol": "ETH"}]}
+                return {
+                    "data": [
+                        {
+                            "id": 1027,
+                            "symbol": "ETH",
+                            "quote": {"USD": {"market_cap": 300}},
+                        }
+                    ]
+                }
+
+        client = FakeClient()
+        with self.assertLogs("crypto_oi_monitor.market_caps", "WARNING") as logs:
+            result = fetch_market_caps(client, {"ETH", "龙虾"})
+
+        self.assertEqual(result.market_caps["ETH"].market_cap_usd, 300)
+        self.assertEqual(result.unmapped_assets, ("龙虾",))
+        self.assertIn("龙虾", "\n".join(logs.output))
+        self.assertEqual(client.calls[0], (CMC_ID_MAP_URL, {"symbol": "ETH"}))
+
+    def test_bisects_generic_symbol_validation_error(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.map_symbols: list[str] = []
+
+            def get_json(self, url: str, params: dict[str, str]):
+                if url == CMC_ID_MAP_URL:
+                    symbols = params["symbol"]
+                    self.map_symbols.append(symbols)
+                    if "REJECTED" in symbols:
+                        error = DataSourceRequestError("CMC map rejected symbol")
+                        error.status_code = 400
+                        error.response_payload = {
+                            "status": {
+                                "error_message": (
+                                    '"symbol" should only include comma-separated '
+                                    "alphanumeric cryptocurrency symbols"
+                                )
+                            }
+                        }
+                        raise error
+                    return {"data": [{"id": 1027, "symbol": "ETH"}]}
+                return {
+                    "data": [
+                        {
+                            "id": 1027,
+                            "symbol": "ETH",
+                            "quote": {"USD": {"market_cap": 300}},
+                        }
+                    ]
+                }
+
+        client = FakeClient()
+        try:
+            result = fetch_market_caps(client, {"ETH", "REJECTED"})
+        except DataSourceRequestError as error:
+            self.fail(f"symbol validation error escaped batch isolation: {error}")
+
+        self.assertEqual(result.market_caps["ETH"].market_cap_usd, 300)
+        self.assertEqual(result.unmapped_assets, ("REJECTED",))
+        self.assertEqual(client.map_symbols, ["ETH,REJECTED", "ETH", "REJECTED"])
+
+    def test_does_not_ignore_unrelated_symbol_map_http_400(self) -> None:
+        class FakeClient:
+            def get_json(self, url: str, params: dict[str, str]):
+                error = DataSourceRequestError("CMC request invalid")
+                error.status_code = 400
+                error.response_payload = {
+                    "status": {"error_message": '"symbol" parameter is missing'}
+                }
+                raise error
+
+        with self.assertRaisesRegex(DataSourceRequestError, "request invalid"):
+            fetch_market_caps(FakeClient(), {"ETH"})
 
     def test_skips_only_symbols_rejected_by_cmc_map(self) -> None:
         class FakeClient:

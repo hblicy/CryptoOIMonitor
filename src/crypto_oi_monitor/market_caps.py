@@ -532,9 +532,18 @@ def _usd_quote_value(quote: dict[str, Any], field: str) -> float | None:
 def _fetch_mapping_data(
     client: MarketCapHttpClient, ordered_assets: list[str]
 ) -> list[dict[str, Any]]:
+    supported_symbols = [
+        symbol for symbol in ordered_assets if re.fullmatch(r"[A-Za-z0-9]+", symbol)
+    ]
+    unsupported_symbols = sorted(set(ordered_assets) - set(supported_symbols))
+    if unsupported_symbols:
+        LOGGER.warning(
+            "CoinMarketCap map cannot query non-alphanumeric symbols: %s",
+            ", ".join(unsupported_symbols),
+        )
     mapping_data: list[dict[str, Any]] = []
-    for start in range(0, len(ordered_assets), 100):
-        symbols = ordered_assets[start : start + 100]
+    for start in range(0, len(supported_symbols), 100):
+        symbols = supported_symbols[start : start + 100]
         mapping_data.extend(_fetch_mapping_batch(client, symbols))
     return mapping_data
 
@@ -555,16 +564,31 @@ def _fetch_mapping_batch(
             invalid_symbols = _invalid_map_symbols(error)
             if invalid_symbols is None:
                 raise
-            unsupported_symbols = sorted(set(remaining_symbols) & invalid_symbols)
-            if not unsupported_symbols:
-                raise
-            LOGGER.warning(
-                "CoinMarketCap does not support symbols: %s",
-                ", ".join(unsupported_symbols),
-            )
-            remaining_symbols = [
-                symbol for symbol in remaining_symbols if symbol not in invalid_symbols
-            ]
+            if invalid_symbols:
+                unsupported_symbols = sorted(set(remaining_symbols) & invalid_symbols)
+                if not unsupported_symbols:
+                    raise
+                LOGGER.warning(
+                    "CoinMarketCap does not support symbols: %s",
+                    ", ".join(unsupported_symbols),
+                )
+                remaining_symbols = [
+                    symbol
+                    for symbol in remaining_symbols
+                    if symbol not in invalid_symbols
+                ]
+                continue
+            if len(remaining_symbols) == 1:
+                LOGGER.warning(
+                    "CoinMarketCap rejected symbol %s: %s",
+                    remaining_symbols[0],
+                    error,
+                )
+                return []
+            middle = len(remaining_symbols) // 2
+            return _fetch_mapping_batch(
+                client, remaining_symbols[:middle]
+            ) + _fetch_mapping_batch(client, remaining_symbols[middle:])
     return []
 
 
@@ -578,9 +602,12 @@ def _invalid_map_symbols(error: DataSourceRequestError) -> set[str] | None:
     if not isinstance(error_message, str):
         return None
     match = re.fullmatch(r'Invalid values? for "symbol": "(.+)"', error_message)
-    if match is None:
-        return None
-    return {symbol.upper() for symbol in match.group(1).split(",")}
+    if match is not None:
+        return {symbol.upper() for symbol in match.group(1).split(",")}
+    normalized_error_message = error_message.lower()
+    if "symbol" in normalized_error_message and "alphanumeric" in normalized_error_message:
+        return set()
+    return None
 
 
 def _data(payload: dict[str, Any]) -> list[dict[str, Any]]:
