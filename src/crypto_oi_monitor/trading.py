@@ -10,12 +10,8 @@ EMA_PERIOD = 200
 EMA_WARMUP_CANDLES = 1000
 REQUIRED_CLOSED_CANDLES = EMA_WARMUP_CANDLES + 1
 FIFTEEN_MINUTES_MILLISECONDS = 15 * 60 * 1000
-HOUR_MILLISECONDS = 60 * 60 * 1000
-HOURLY_EMA_SLOPE_BARS = 4
-MIN_HOURLY_CANDLES = EMA_PERIOD + HOURLY_EMA_SLOPE_BARS
 ENTRY_RSI_MIN = 35
 ENTRY_RSI_MAX = 50
-ENTRY_EMA_ATR_BUFFER = 0.25
 EXIT_EMA_ATR_BUFFER = 0.5
 LONG = "long"
 BINANCE_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
@@ -31,6 +27,7 @@ class Candle:
     high: float
     low: float
     close: float
+    quote_volume: float
 
 
 @dataclass(frozen=True)
@@ -41,25 +38,26 @@ class TradeSetup:
     stop_loss: float
     rsi: float
     previous_rsi: float
+    previous_close: float
     ema200: float
+    previous_ema200: float
     atr: float
-    hourly_close: float
-    hourly_ema200: float
-    previous_hourly_ema200: float
+    quote_volume: float
+    previous_quote_volume: float
 
 
 @dataclass(frozen=True)
 class TradeIndicators:
     candle_close_time: int
+    previous_close: float
     close: float
     rsi: float
     previous_rsi: float
     ema200: float
     previous_ema200: float
     atr: float
-    hourly_close: float
-    hourly_ema200: float
-    previous_hourly_ema200: float
+    quote_volume: float
+    previous_quote_volume: float
 
 
 def fetch_binance_closed_candles(
@@ -79,6 +77,7 @@ def fetch_binance_closed_candles(
             high=float(candle[2]),
             low=float(candle[3]),
             close=float(candle[4]),
+            quote_volume=float(candle[7]),
         )
         for candle in payload[:-1]
     ]
@@ -102,11 +101,12 @@ def evaluate_trade_setup(candles: list[Candle]) -> TradeSetup | None:
         indicators.close - 2 * indicators.atr,
         indicators.rsi,
         indicators.previous_rsi,
+        indicators.previous_close,
         indicators.ema200,
+        indicators.previous_ema200,
         indicators.atr,
-        indicators.hourly_close,
-        indicators.hourly_ema200,
-        indicators.previous_hourly_ema200,
+        indicators.quote_volume,
+        indicators.previous_quote_volume,
     )
 
 
@@ -119,44 +119,46 @@ def trade_indicators(candles: list[Candle]) -> TradeIndicators:
     previous_rsi, rsi = _rsi_values(closes, RSI_PERIOD)[-2:]
     previous_ema200, ema200 = _ema_values(closes, EMA_PERIOD)[-2:]
     atr = _atr(candles, ATR_PERIOD)
-    hourly_closes = _closed_hourly_closes(candles)
-    if len(hourly_closes) < MIN_HOURLY_CANDLES:
-        raise ValueError(
-            "Binance 15m candles do not contain enough complete 1h candles "
-            f"for EMA200 trend confirmation; require at least {MIN_HOURLY_CANDLES}"
-        )
-    hourly_emas = _ema_values(hourly_closes, EMA_PERIOD)
-    hourly_ema200 = hourly_emas[-1]
-    previous_hourly_ema200 = hourly_emas[-1 - HOURLY_EMA_SLOPE_BARS]
+    previous = candles[-2]
     current = candles[-1]
     return TradeIndicators(
         current.close_time,
+        previous.close,
         current.close,
         rsi,
         previous_rsi,
         ema200,
         previous_ema200,
         atr,
-        hourly_closes[-1],
-        hourly_ema200,
-        previous_hourly_ema200,
+        current.quote_volume,
+        previous.quote_volume,
     )
 
 
 def entry_reasons(indicators: TradeIndicators) -> tuple[str, ...]:
     reasons = []
-    if indicators.hourly_close <= indicators.hourly_ema200:
-        reasons.append("hourly_close_not_above_ema200")
-    if indicators.hourly_ema200 <= indicators.previous_hourly_ema200:
-        reasons.append("hourly_ema200_not_rising")
-    if indicators.close <= indicators.ema200 + ENTRY_EMA_ATR_BUFFER * indicators.atr:
-        reasons.append("close_not_above_ema200_buffer")
+    if not (
+        indicators.previous_close <= indicators.previous_ema200
+        and indicators.close > indicators.ema200
+    ):
+        reasons.append("ema200_not_crossed_up")
+    if indicators.quote_volume <= indicators.previous_quote_volume:
+        reasons.append("quote_volume_not_increasing")
     if indicators.rsi < ENTRY_RSI_MIN:
         reasons.append("rsi_below_35")
     if indicators.rsi >= ENTRY_RSI_MAX:
         reasons.append("rsi_not_below_50")
     if indicators.rsi <= indicators.previous_rsi:
         reasons.append("rsi_not_rising")
+    return tuple(reasons)
+
+
+def stop_long_reasons(indicators: TradeIndicators) -> tuple[str, ...]:
+    reasons = []
+    if indicators.rsi >= ENTRY_RSI_MAX:
+        reasons.append("rsi_not_below_50")
+    if indicators.close <= indicators.ema200:
+        reasons.append("close_not_above_ema200")
     return tuple(reasons)
 
 
@@ -198,25 +200,6 @@ def _ema_values(values: list[float], period: int) -> list[float]:
         average = (value - average) * multiplier + average
         result.append(average)
     return result
-
-
-def _closed_hourly_closes(candles: list[Candle]) -> list[float]:
-    by_hour: dict[int, list[Candle]] = {}
-    for candle in candles:
-        by_hour.setdefault(candle.close_time // HOUR_MILLISECONDS, []).append(candle)
-
-    closes = []
-    for hour, grouped in sorted(by_hour.items()):
-        expected_close_times = [
-            hour * HOUR_MILLISECONDS
-            + FIFTEEN_MINUTES_MILLISECONDS * step
-            - 1
-            for step in range(1, 5)
-        ]
-        ordered = sorted(grouped, key=lambda candle: candle.close_time)
-        if [candle.close_time for candle in ordered] == expected_close_times:
-            closes.append(ordered[-1].close)
-    return closes
 
 
 def _rsi_values(closes: list[float], period: int) -> list[float]:

@@ -37,8 +37,11 @@ describe("data source groups", () => {
   it("labels long and stop-long signal details for the dashboard", () => {
     expect(tradeSignalLabel("long")).toBe("开多");
     expect(tradeSignalLabel("stop_long")).toBe("停止开多");
-    expect(tradeSignalReason("oi_to_market_cap_below_110")).toBe("OI / 市值低于 110%");
-    expect(tradeSignalReason("oi_to_market_cap_not_above_130")).toBe("OI / 市值未高于 130%");
+    expect(tradeSignalReason("oi_to_market_cap_not_above_100")).toBe("OI / 市值未高于 100%");
+    expect(tradeSignalReason("aggregate_oi_history_unavailable")).toBe("缺少15分钟前聚合 OI");
+    expect(tradeSignalReason("aggregate_oi_not_increasing")).toBe("聚合 OI 未较15分钟前增加");
+    expect(tradeSignalReason("ema200_not_crossed_up")).toBe("15m 收盘价未首次上穿 EMA200");
+    expect(tradeSignalReason("quote_volume_not_increasing")).toBe("15m USDT 成交额未较上一根增加");
     expect(tradeSignalReason("rsi_above_50")).toBe("RSI(14) 超过 50");
     expect(tradeSignalReason("close_below_ema200")).toBe("15m 收盘价低于 EMA200");
   });

@@ -34,14 +34,15 @@ export function tradeSignalReason(reason) {
   if (reason === "atr_stop_loss") return "触及 2 × ATR 止损";
   if (reason === "close_below_ema200_exit_buffer") return "15m 收盘价低于 EMA200 − 0.5 × ATR";
   if (reason === "two_closes_below_ema200") return "连续两根 15m 收盘价低于 EMA200";
-  if (reason === "hourly_close_not_above_ema200") return "1h 收盘价未高于 EMA200";
-  if (reason === "hourly_ema200_not_rising") return "1h EMA200 未上行";
-  if (reason === "close_not_above_ema200_buffer") return "15m 收盘价未高于 EMA200 + 0.25 × ATR";
+  if (reason === "ema200_not_crossed_up") return "15m 收盘价未首次上穿 EMA200";
+  if (reason === "quote_volume_not_increasing") return "15m USDT 成交额未较上一根增加";
+  if (reason === "aggregate_oi_history_unavailable") return "缺少15分钟前聚合 OI";
+  if (reason === "aggregate_oi_not_increasing") return "聚合 OI 未较15分钟前增加";
+  if (reason === "close_not_above_ema200") return "15m 收盘价未高于 EMA200";
   if (reason === "rsi_below_35") return "RSI(14) 低于 35";
   if (reason === "rsi_not_below_50") return "RSI(14) 未低于 50";
   if (reason === "rsi_not_rising") return "RSI(14) 未回升";
-  if (reason === "oi_to_market_cap_below_110") return "OI / 市值低于 110%";
-  if (reason === "oi_to_market_cap_not_above_130") return "OI / 市值未高于 130%";
+  if (reason === "oi_to_market_cap_not_above_100") return "OI / 市值未高于 100%";
   if (reason === "rsi_above_50") return "RSI(14) 超过 50";
   if (reason === "close_below_ema200") return "15m 收盘价低于 EMA200";
   return reason;
@@ -292,12 +293,12 @@ function TradeConditionPanel({ scans, complete }) {
     <section className="trade-signal-panel" aria-label="交易条件扫描">
       <header className="trade-signal-heading">
         <strong>交易条件扫描</strong>
-        <span>OI / 市值 &gt; 130%；1h 趋势向上；15m 收盘价高于 EMA200 + 0.25 × ATR；RSI 在 35-50 且回升</span>
+        <span>OI / 市值 &gt; 100%；15m 首次上穿 EMA200；聚合 OI 与15m成交额均增长；RSI 在 35-50 且回升</span>
       </header>
       {!complete
         ? <p className="trade-signal-empty">数据源不完整，本轮未执行交易条件扫描。</p>
         : !scans.length
-          ? <p className="trade-signal-empty">本轮没有 OI / 市值大于 110% 的标的。</p>
+          ? <p className="trade-signal-empty">本轮没有 OI / 市值大于 100% 的标的。</p>
           : <div className="trade-condition-groups">
             <TradeConditionGroup title="可以做多" status="can_long" scans={canLong} />
             <TradeConditionGroup title="停止做多" status="stop_long" scans={stopLong} />
@@ -342,7 +343,11 @@ function TradeConditionCard({ scan }) {
             <div><dt>OI / 市值</dt><dd>{formatRatio(scan.oi_to_market_cap)}</dd></div>
           </dl>
           {scan.status === "can_long"
-            ? <p className="trade-signal-note">满足 1h 趋势、15m EMA200 + 0.25 × ATR 与 RSI 回升条件。</p>
+            ? <p className="trade-signal-note">
+              满足首次上穿 EMA200、RSI 回升、聚合 OI 与15m成交额增长条件；
+              聚合 OI {formatUsd(scan.previous_aggregate_oi_usd)} → {formatUsd(scan.aggregate_oi_usd)}；
+              15m成交额 {formatUsd(scan.previous_quote_volume)} → {formatUsd(scan.quote_volume)}。
+            </p>
             : <p className="trade-signal-note">{scan.status === "exit_long" ? "必须退出原因" : "停止原因"}：{reasons}。</p>}
         </>}
     </article>

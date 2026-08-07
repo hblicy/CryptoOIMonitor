@@ -2,6 +2,7 @@ import json
 import os
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import ANY, patch
 from argparse import ArgumentTypeError
 
@@ -18,6 +19,7 @@ from crypto_oi_monitor.trade_dispatch import (
 class FakeCoordinator:
     def __init__(self, snapshot=None) -> None:
         self.snapshot = snapshot or {"complete": True, "comparisons": []}
+        self.snapshot.setdefault("captured_at", "2026-08-07T00:15:00+00:00")
 
     def refresh(self):
         return self.snapshot
@@ -29,6 +31,10 @@ class FakeStore:
 
     def save_snapshot(self, snapshot) -> None:
         self.saved.append(snapshot)
+
+    def load_complete_snapshot_near(self, target, tolerance):
+        self.reference_request = (target, tolerance)
+        return None
 
     def clear_states_outside(self, active_assets) -> None:
         self.active_assets = active_assets
@@ -102,9 +108,17 @@ class AppRefreshTests(unittest.TestCase):
         self.assertEqual(snapshot["notification"]["status"], "ok")
         dispatch_trade_signals_mock.assert_called_once_with(
             snapshot,
+            None,
             application.trade_kline_loader,
             application.store,
             application.notifier,
+        )
+        self.assertEqual(
+            application.store.reference_request,
+            (
+                datetime(2026, 8, 7, 0, 0, tzinfo=timezone.utc),
+                timedelta(minutes=5),
+            ),
         )
 
     def test_clears_states_not_in_a_complete_snapshot(self) -> None:
@@ -201,37 +215,11 @@ class AppRefreshTests(unittest.TestCase):
 
         self.assertEqual(
             snapshot["notification"]["trade_signal_details"],
-            [
-                {
-                    "event_type": "long",
-                    "canonical_symbol": "PEPE",
-                    "candle_close_time": 1_722_269_700_000,
-                    "rsi": 42.5,
-                    "close": 0.00001234,
-                    "ema200": 0.00001111,
-                    "oi_to_market_cap": 1.2,
-                    "entry_price": 0.00001234,
-                    "stop_loss": 0.00001,
-                    "atr": 0.00000117,
-                    "reasons": [],
-                }
-            ],
+            [detail.as_dict()],
         )
         self.assertEqual(
             snapshot["notification"]["trade_condition_scans"],
-            [
-                {
-                    "status": "can_long",
-                    "canonical_symbol": "PEPE",
-                    "candle_close_time": 1_722_269_700_000,
-                    "rsi": 42.5,
-                    "close": 0.00001234,
-                    "ema200": 0.00001111,
-                    "oi_to_market_cap": 1.2,
-                    "reasons": [],
-                    "error": None,
-                }
-            ],
+            [scan.as_dict()],
         )
 
     def test_pushes_condition_list_after_a_complete_condition_scan(self) -> None:

@@ -184,6 +184,37 @@ class SnapshotStore:
             ).fetchone()
         return None if row is None else json.loads(row[0])
 
+    def load_complete_snapshot_near(
+        self, target: datetime, tolerance: timedelta
+    ) -> dict[str, Any] | None:
+        lower_bound = (target - tolerance).isoformat()
+        upper_bound = (target + tolerance).isoformat()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT captured_at, payload
+                FROM snapshots
+                WHERE captured_at >= ? AND captured_at <= ?
+                ORDER BY captured_at
+                """,
+                (lower_bound, upper_bound),
+            ).fetchall()
+
+        candidates: list[tuple[datetime, dict[str, Any]]] = []
+        for captured_at, payload in rows:
+            snapshot = json.loads(payload)
+            if snapshot.get("complete") is True:
+                candidates.append((datetime.fromisoformat(captured_at), snapshot))
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda item: (
+                abs(item[0] - target),
+                item[0] > target,
+            ),
+        )[1]
+
     def get_alert_status(self, canonical_symbol: str) -> str | None:
         with self._connect() as connection:
             row = connection.execute(

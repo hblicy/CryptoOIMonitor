@@ -7,7 +7,7 @@ import mimetypes
 import os
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -151,7 +151,16 @@ class MonitorApplication:
     def refresh(self) -> dict[str, Any]:
         with self._lock:
             snapshot = self.coordinator.refresh()
+            reference_snapshot = None
             if snapshot["complete"]:
+                captured_at = datetime.fromisoformat(snapshot["captured_at"])
+                reference_snapshot = self.store.load_complete_snapshot_near(
+                    captured_at - timedelta(minutes=15), timedelta(minutes=5)
+                )
+                if reference_snapshot is None:
+                    LOGGER.info(
+                        "15 分钟前完整 OI 快照不可用，本轮不会产生新的开多信号"
+                    )
                 active_assets = {
                     comparison["canonical_symbol"]
                     for comparison in snapshot["comparisons"]
@@ -170,7 +179,9 @@ class MonitorApplication:
                     "status": "not_configured",
                     "message": "WECOM_ROBOT_WEBHOOK_URL 未配置，企业微信推送未启用。",
                     **_condition_scan_payload(
-                        scan_trade_conditions(snapshot, self.trade_kline_loader)
+                        scan_trade_conditions(
+                            snapshot, reference_snapshot, self.trade_kline_loader
+                        )
                     ),
                 }
             elif not snapshot["complete"]:
@@ -182,6 +193,7 @@ class MonitorApplication:
                 try:
                     trade_result = dispatch_trade_signals(
                         snapshot,
+                        reference_snapshot,
                         self.trade_kline_loader,
                         self.store,
                         self.notifier,
@@ -193,7 +205,9 @@ class MonitorApplication:
                         "trade_signal_status": "error",
                         "message": f"交易信号失败：{type(error).__name__}: {error}",
                         **_condition_scan_payload(
-                            scan_trade_conditions(snapshot, self.trade_kline_loader)
+                            scan_trade_conditions(
+                                snapshot, reference_snapshot, self.trade_kline_loader
+                            )
                         ),
                     }
                 else:

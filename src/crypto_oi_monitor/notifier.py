@@ -26,13 +26,20 @@ class WeComNotifier:
             raise RuntimeError(f"WeCom webhook rejected message: {response}")
 
     def send_trade_signal(
-        self, signal: TradeSetup, comparison: dict[str, Any]
+        self,
+        signal: TradeSetup,
+        comparison: dict[str, Any],
+        previous_aggregate_oi_usd: float,
     ) -> None:
         response = self.client.post_json(
             self.webhook_url,
             {
                 "msgtype": "text",
-                "text": {"content": _trade_message(signal, comparison)},
+                "text": {
+                    "content": _trade_message(
+                        signal, comparison, previous_aggregate_oi_usd
+                    )
+                },
             },
         )
         if response["errcode"] != 0:
@@ -114,7 +121,11 @@ def _message(event: str, comparison: dict[str, Any]) -> str:
     )
 
 
-def _trade_message(signal: TradeSetup, comparison: dict[str, Any]) -> str:
+def _trade_message(
+    signal: TradeSetup,
+    comparison: dict[str, Any],
+    previous_aggregate_oi_usd: float,
+) -> str:
     if signal.side != LONG:
         raise ValueError(f"Unsupported trade signal side: {signal.side}")
     title = "【交易信号：做多】"
@@ -125,13 +136,19 @@ def _trade_message(signal: TradeSetup, comparison: dict[str, Any]) -> str:
         f"参考入场：{signal.entry_price:.8f}\n"
         f"止损：{signal.stop_loss:.8f}（2 × ATR(14)）\n"
         f"做多条件：OI / 市值 > {TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO * 100:.0f}%；"
-        "1h 趋势向上；15m 收盘价高于 EMA200 + 0.25 × ATR；"
-        "RSI(14) 在 35-50 且回升\n"
+        "15m 收盘价首次上穿 EMA200；聚合 OI 较15分钟前增加；"
+        "15m USDT 成交额较上一根增加；RSI(14) 在 35-50 且回升\n"
         "风险规则：亏损不补仓；触及止损或 EMA 结构退出条件时必须退出。\n"
         f"杠杆参考：2-3倍\n"
-        f"RSI(14)：{signal.rsi:.2f}\n"
-        f"EMA200：{signal.ema200:.8f}\n"
-        f"1h EMA200：{signal.hourly_ema200:.8f}\n"
+        f"RSI(14)：{signal.previous_rsi:.2f} → {signal.rsi:.2f}\n"
+        f"上一根收盘价：{signal.previous_close:.8f}\n"
+        f"上一根 EMA200：{signal.previous_ema200:.8f}\n"
+        f"当前收盘价：{signal.entry_price:.8f}\n"
+        f"当前 EMA200：{signal.ema200:.8f}\n"
+        f"上一根15m成交额：{signal.previous_quote_volume:,.2f} USD\n"
+        f"当前15m成交额：{signal.quote_volume:,.2f} USD\n"
+        f"15分钟前聚合 OI：{previous_aggregate_oi_usd:,.2f} USD\n"
+        f"当前聚合 OI：{comparison['total_oi_usd']:,.2f} USD\n"
         f"ATR(14)：{signal.atr:.8f}\n"
         f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%"
     )
@@ -206,11 +223,12 @@ def _exit_long_message(
 
 def _reason_text(reason: str) -> str:
     labels = {
-        "oi_to_market_cap_below_110": "OI / 市值已低于 110%",
-        "oi_to_market_cap_not_above_130": "OI / 市值未高于 130%",
-        "hourly_close_not_above_ema200": "1h 收盘价未高于 EMA200",
-        "hourly_ema200_not_rising": "1h EMA200 未上行",
-        "close_not_above_ema200_buffer": "15m 收盘价未高于 EMA200 + 0.25 × ATR",
+        "oi_to_market_cap_not_above_100": "OI / 市值未高于 100%",
+        "aggregate_oi_history_unavailable": "缺少15分钟前聚合 OI",
+        "aggregate_oi_not_increasing": "聚合 OI 未较15分钟前增加",
+        "ema200_not_crossed_up": "15m 收盘价未首次上穿 EMA200",
+        "quote_volume_not_increasing": "15m USDT 成交额未较上一根增加",
+        "close_not_above_ema200": "15m 收盘价未高于 EMA200",
         "rsi_below_35": "RSI(14) 低于 35",
         "rsi_not_below_50": "RSI(14) 未低于 50",
         "rsi_not_rising": "RSI(14) 未回升",

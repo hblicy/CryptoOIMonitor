@@ -1,7 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -56,6 +56,59 @@ class SnapshotStoreTests(unittest.TestCase):
             self.assertEqual(store.load_latest_snapshot(), snapshot)
             self.assertEqual(store.get_alert_status("ETH"), "high_risk")
             self.assertIsNone(store.get_alert_status("BTC"))
+
+    def test_loads_closest_complete_snapshot_near_target_and_prefers_earlier_tie(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SnapshotStore(Path(temp_dir) / "monitor.db")
+            earlier = {
+                "captured_at": "2026-08-07T00:14:00+00:00",
+                "complete": True,
+            }
+            store.save_snapshot(earlier)
+            store.save_snapshot(
+                {
+                    "captured_at": "2026-08-07T00:15:00+00:00",
+                    "complete": False,
+                }
+            )
+            store.save_snapshot(
+                {
+                    "captured_at": "2026-08-07T00:16:00+00:00",
+                    "complete": True,
+                }
+            )
+
+            result = store.load_complete_snapshot_near(
+                datetime(2026, 8, 7, 0, 15, tzinfo=timezone.utc),
+                timedelta(minutes=5),
+            )
+
+            self.assertEqual(result, earlier)
+
+    def test_returns_none_when_no_complete_snapshot_is_within_tolerance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SnapshotStore(Path(temp_dir) / "monitor.db")
+            store.save_snapshot(
+                {
+                    "captured_at": "2026-08-07T00:09:59+00:00",
+                    "complete": True,
+                }
+            )
+            store.save_snapshot(
+                {
+                    "captured_at": "2026-08-07T00:15:00+00:00",
+                    "complete": False,
+                }
+            )
+
+            result = store.load_complete_snapshot_near(
+                datetime(2026, 8, 7, 0, 15, tzinfo=timezone.utc),
+                timedelta(minutes=5),
+            )
+
+            self.assertIsNone(result)
 
     def test_persists_and_clears_trade_signal_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

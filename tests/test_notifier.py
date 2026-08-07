@@ -18,15 +18,15 @@ class RecordingClient:
 def _indicators(rsi: float = 45, close: float = 101, ema200: float = 100) -> TradeIndicators:
     return TradeIndicators(
         candle_close_time=1_000,
+        previous_close=99,
         close=close,
         rsi=rsi,
         previous_rsi=rsi - 1,
         ema200=ema200,
         previous_ema200=ema200 - 0.1,
         atr=3,
-        hourly_close=102,
-        hourly_ema200=100,
-        previous_hourly_ema200=99.9,
+        quote_volume=120,
+        previous_quote_volume=100,
     )
 
 
@@ -126,11 +126,12 @@ class WeComNotifierTests(unittest.TestCase):
                 stop_loss=240,
                 rsi=35,
                 previous_rsi=10,
+                previous_close=228,
                 ema200=229,
+                previous_ema200=228.5,
                 atr=3,
-                hourly_close=250,
-                hourly_ema200=230,
-                previous_hourly_ema200=229,
+                quote_volume=1_200_000,
+                previous_quote_volume=1_000_000,
             ),
             {
                 "canonical_symbol": "PEPE",
@@ -139,6 +140,7 @@ class WeComNotifierTests(unittest.TestCase):
                 "market_cap_usd": 100,
                 "contracts": [],
             },
+            110,
         )
 
         payload = client.sent[0][1]
@@ -149,7 +151,15 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertIn("参考入场：246.00000000", content)
         self.assertIn("止损：240.00000000", content)
         self.assertIn("做多条件", content)
-        self.assertIn("OI / 市值 > 130%", content)
+        self.assertIn("OI / 市值 > 100%", content)
+        self.assertIn("15分钟前聚合 OI：110.00 USD", content)
+        self.assertIn("当前聚合 OI：120.00 USD", content)
+        self.assertIn("上一根收盘价：228.00000000", content)
+        self.assertIn("当前收盘价：246.00000000", content)
+        self.assertIn("上一根15m成交额：1,000,000.00 USD", content)
+        self.assertIn("当前15m成交额：1,200,000.00 USD", content)
+        self.assertNotIn("1h", content)
+        self.assertNotIn("0.25", content)
         self.assertIn("亏损不补仓", content)
         self.assertIn("杠杆参考：2-3倍", content)
         self.assertIn("OI / 市值：120.00%", content)
@@ -184,29 +194,29 @@ class WeComNotifierTests(unittest.TestCase):
         notifier.send_stop_long(
             {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.2},
             _indicators(45, 99, 100),
-            ("close_not_above_ema200_buffer",),
+            ("close_not_above_ema200",),
         )
 
         content = client.sent[0][1]["text"]["content"]
         self.assertIn("收盘价：99.00000000", content)
         self.assertIn("EMA200：100.00000000", content)
-        self.assertIn("15m 收盘价未高于 EMA200 + 0.25 × ATR", content)
+        self.assertIn("15m 收盘价未高于 EMA200", content)
 
-    def test_sends_stop_long_message_when_oi_to_market_cap_is_below_110(
+    def test_sends_stop_long_message_when_oi_to_market_cap_is_not_above_100(
         self,
     ) -> None:
         client = RecordingClient()
         notifier = WeComNotifier("https://wecom.example/webhook", client)
 
         notifier.send_stop_long(
-            {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.09},
+            {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.0},
             None,
-            ("oi_to_market_cap_below_110",),
+            ("oi_to_market_cap_not_above_100",),
         )
 
         content = client.sent[0][1]["text"]["content"]
-        self.assertIn("OI / 市值已低于 110%", content)
-        self.assertIn("OI / 市值：109.00%", content)
+        self.assertIn("OI / 市值未高于 100%", content)
+        self.assertIn("OI / 市值：100.00%", content)
 
     def test_sends_oi_threshold_stop_message_without_kline_metrics(self) -> None:
         client = RecordingClient()
@@ -215,7 +225,7 @@ class WeComNotifierTests(unittest.TestCase):
         notifier.send_stop_long(
             {"canonical_symbol": "PEPE", "oi_to_market_cap": 0.99},
             None,
-            ("oi_to_market_cap_below_110",),
+            ("oi_to_market_cap_not_above_100",),
         )
 
         content = client.sent[0][1]["text"]["content"]
@@ -253,13 +263,15 @@ class WeComNotifierTests(unittest.TestCase):
                     stop_loss=250,
                     rsi=65,
                     previous_rsi=90,
+                    previous_close=251,
                     ema200=250,
+                    previous_ema200=250,
                     atr=3,
-                    hourly_close=246,
-                    hourly_ema200=250,
-                    previous_hourly_ema200=251,
+                    quote_volume=1_200_000,
+                    previous_quote_volume=1_000_000,
                 ),
                 {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.2},
+                110,
             )
 
 
