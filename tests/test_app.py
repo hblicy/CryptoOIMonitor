@@ -8,6 +8,7 @@ from argparse import ArgumentTypeError
 
 from app import MonitorApplication, next_refresh_schedule, positive_refresh_seconds
 from crypto_oi_monitor.trade_dispatch import (
+    EXIT_LONG,
     TradeConditionScan,
     TradeConditionScanResult,
     TradeSignalEvent,
@@ -46,6 +47,45 @@ class TradeSignalOnlyNotifier:
 
 
 class AppRefreshTests(unittest.TestCase):
+    def test_incomplete_snapshot_still_dispatches_active_risk_signals(self) -> None:
+        application = MonitorApplication.__new__(MonitorApplication)
+        application.coordinator = FakeCoordinator(
+            {"complete": False, "comparisons": [], "unmapped_assets": ["PEPE"]}
+        )
+        application.store = FakeStore()
+        application.notifier = TradeSignalOnlyNotifier()
+        application.trade_kline_loader = object()
+        application._lock = threading.Lock()
+        exit_event = TradeSignalEvent(
+            event_type=EXIT_LONG,
+            canonical_symbol="PEPE",
+            candle_close_time=1,
+            rsi=40,
+            close=90,
+            ema200=100,
+            oi_to_market_cap=None,
+            reasons=("atr_stop_loss",),
+        )
+
+        with patch(
+            "app.dispatch_trade_signals",
+            return_value=TradeSignalDispatchResult(
+                (EXIT_LONG,), (), (exit_event,), ()
+            ),
+        ) as dispatch_mock, patch(
+            "app.dispatch_trade_condition_list"
+        ) as dispatch_list_mock:
+            snapshot = application.refresh()
+
+        dispatch_mock.assert_called_once()
+        dispatch_list_mock.assert_not_called()
+        self.assertEqual(
+            snapshot["notification"]["trade_signal_events"], [EXIT_LONG]
+        )
+        self.assertEqual(
+            snapshot["notification"]["trade_condition_list_status"], "suppressed"
+        )
+
     def test_scans_conditions_when_wecom_is_not_configured(self) -> None:
         application = MonitorApplication.__new__(MonitorApplication)
         application.coordinator = FakeCoordinator()

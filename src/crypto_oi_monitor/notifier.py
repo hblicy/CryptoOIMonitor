@@ -193,6 +193,13 @@ def _trade_condition_list_message(
     )
 
 
+def _oi_to_market_cap_line(comparison: dict[str, Any]) -> str:
+    ratio = comparison["oi_to_market_cap"]
+    if ratio is None:
+        return "OI / 市值：不可用（数据源不完整）"
+    return f"OI / 市值：{ratio * 100:.2f}%"
+
+
 def _stop_long_message(
     comparison: dict[str, Any],
     indicators: TradeIndicators | None,
@@ -216,7 +223,7 @@ def _stop_long_message(
         f"{period}"
         f"{kline_metrics}"
         f"原因：{'；'.join(_reason_text(reason) for reason in reasons)}，请勿继续开多或补仓。\n"
-        f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%"
+        + _oi_to_market_cap_line(comparison)
     )
 
 
@@ -239,7 +246,7 @@ def _exit_long_message(
         f"EMA200：{indicators.ema200:.8f}\n"
         f"原因：{'；'.join(_reason_text(reason) for reason in reasons)}。请执行退出，不要补仓。\n"
         f"重新开仓：等待 {cooldown_candles} 根 15m K 线，并重新满足完整做多条件。\n"
-        f"OI / 市值：{comparison['oi_to_market_cap'] * 100:.2f}%"
+        + _oi_to_market_cap_line(comparison)
     )
 
 

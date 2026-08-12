@@ -47,6 +47,8 @@ export function tradeSignalReason(reason) {
   if (reason === "rsi_not_rising") return "RSI(14) 未回升";
   if (reason === "oi_to_market_cap_not_above_90") return "OI / 市值未高于 90%";
   if (reason === "close_below_ema200") return "15m 收盘价低于 EMA200";
+  if (reason === "reentry_cooldown_active") return "仍处于必须退出后的动态冷却期";
+  if (reason === "data_source_incomplete") return "数据源不完整，暂停新开仓";
   return reason;
 }
 
@@ -289,7 +291,7 @@ function Coverage({ venues }) {
   return <span className="coverage"><span>{coverage.toFixed(1)}%</span><i><b style={{ width: `${coverage}%` }} /></i></span>;
 }
 
-function TradeConditionPanel({ scans, complete }) {
+export function TradeConditionPanel({ scans, complete }) {
   const { canLong, stopLong, exitLong, errors } = groupTradeConditionScans(scans);
   return (
     <section className="trade-signal-panel" aria-label="交易条件扫描">
@@ -297,7 +299,8 @@ function TradeConditionPanel({ scans, complete }) {
         <strong>交易条件扫描</strong>
         <span>OI / 市值 &gt; 90%；15m 首次上穿 EMA200 且 EMA200 向上；价格校正 OI 增长；成交额突破前20根均量的1.2倍；RSI &lt; 60 且回升</span>
       </header>
-      {!complete
+      {!complete && <p className="trade-signal-empty">数据源不完整：已暂停新开仓，已有交易状态的 15m 风控仍在执行。</p>}
+      {!complete && !scans.length
         ? <p className="trade-signal-empty">数据源不完整，本轮未执行交易条件扫描。</p>
         : !scans.length
           ? <p className="trade-signal-empty">本轮没有 OI / 市值大于 90% 的标的。</p>

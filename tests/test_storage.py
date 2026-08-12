@@ -114,10 +114,13 @@ class SnapshotStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = SnapshotStore(Path(temp_dir) / "monitor.db")
 
-            state = TradeSignalState("long", 100, 96, None, 2, 106, 1234)
+            state = TradeSignalState(
+                "long", 100, 96, None, 2, 106, 1234, "ETHUSDT"
+            )
             store.set_trade_signal_state("ETH", state)
 
             self.assertEqual(store.get_trade_signal_state("ETH"), state)
+            self.assertEqual(store.list_trade_signal_states(), {"ETH": state})
             store.clear_trade_signal_state("ETH")
             self.assertIsNone(store.get_trade_signal_state("ETH"))
 

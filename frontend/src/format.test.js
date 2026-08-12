@@ -13,4 +13,8 @@ describe("dashboard formatting", () => {
     expect(riskLabel("warning")).toBe("重点关注（>110%）");
     expect(riskLabel("normal")).toBe("常规");
   });
+
+  it("does not render a missing OI ratio as zero", () => {
+    expect(formatRatio(null)).toBe("\u2014");
+  });
 });

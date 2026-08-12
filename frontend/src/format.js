@@ -16,6 +16,9 @@ export function formatUsd(value) {
 }
 
 export function formatRatio(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "—";
+  }
   return `${(Number(value) * 100).toFixed(2)}%`;
 }
 

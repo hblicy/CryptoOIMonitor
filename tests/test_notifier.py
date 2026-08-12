@@ -278,6 +278,22 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertNotIn("周期：15m（已收盘）", content)
         self.assertIn("OI / 市值：89.00%", content)
 
+    def test_sends_stop_long_when_market_cap_is_temporarily_unavailable(self) -> None:
+        client = RecordingClient()
+        notifier = WeComNotifier("https://wecom.example/webhook", client)
+
+        notifier.send_stop_long(
+            {"canonical_symbol": "PEPE", "oi_to_market_cap": None},
+            _indicators(62.5, 101, 100),
+            ("rsi_not_below_60",),
+        )
+
+        content = client.sent[0][1]["text"]["content"]
+        self.assertIn(
+            "OI / \u5e02\u503c\uff1a\u4e0d\u53ef\u7528\uff08\u6570\u636e\u6e90\u4e0d\u5b8c\u6574\uff09",
+            content,
+        )
+
     def test_sends_must_exit_message_with_stop_and_cooldown(self) -> None:
         client = RecordingClient()
         notifier = WeComNotifier("https://wecom.example/webhook", client)
@@ -295,6 +311,24 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertIn("止损：98.00000000", content)
         self.assertIn("请执行退出，不要补仓", content)
         self.assertIn("等待 6 根 15m K 线", content)
+
+    def test_sends_must_exit_when_market_cap_is_temporarily_unavailable(self) -> None:
+        client = RecordingClient()
+        notifier = WeComNotifier("https://wecom.example/webhook", client)
+
+        notifier.send_exit_long(
+            {"canonical_symbol": "PEPE", "oi_to_market_cap": None},
+            _indicators(40, 97, 100),
+            TradeSignalState("long", 100, 98, None, 1, 100),
+            ("atr_stop_loss",),
+            6,
+        )
+
+        content = client.sent[0][1]["text"]["content"]
+        self.assertIn(
+            "OI / \u5e02\u503c\uff1a\u4e0d\u53ef\u7528\uff08\u6570\u636e\u6e90\u4e0d\u5b8c\u6574\uff09",
+            content,
+        )
 
     def test_rejects_short_trade_signals(self) -> None:
         notifier = WeComNotifier("https://wecom.example/webhook", RecordingClient())

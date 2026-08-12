@@ -73,6 +73,7 @@ class SnapshotStore:
                 ("entry_atr", "REAL"),
                 ("highest_close", "REAL"),
                 ("last_processed_candle_close_time", "INTEGER"),
+                ("binance_symbol", "TEXT"),
             ):
                 if column not in columns:
                     connection.execute(
@@ -290,7 +291,8 @@ class SnapshotStore:
             row = connection.execute(
                 """
                 SELECT side, entry_price, stop_loss, cooldown_until_candle_close_time,
-                       entry_atr, highest_close, last_processed_candle_close_time
+                       entry_atr, highest_close, last_processed_candle_close_time,
+                       binance_symbol
                 FROM trade_signal_states
                 WHERE canonical_symbol = ?
                 """,
@@ -308,6 +310,7 @@ class SnapshotStore:
                 last_processed_candle_close_time=(
                     None if row[6] is None else int(row[6])
                 ),
+                binance_symbol=None if row[7] is None else str(row[7]),
             )
             if state.status in {"long", "no_add"} and (
                 state.entry_price is None
@@ -325,6 +328,21 @@ class SnapshotStore:
                 return None
         return state
 
+    def list_trade_signal_states(self) -> dict[str, TradeSignalState]:
+        with self._connect() as connection:
+            symbols = [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT canonical_symbol FROM trade_signal_states"
+                ).fetchall()
+            ]
+        states = {
+            symbol: state
+            for symbol in symbols
+            if (state := self.get_trade_signal_state(symbol)) is not None
+        }
+        return states
+
     def set_trade_signal_state(
         self, canonical_symbol: str, state: TradeSignalState
     ) -> None:
@@ -339,8 +357,9 @@ class SnapshotStore:
                     cooldown_until_candle_close_time,
                     entry_atr,
                     highest_close,
-                    last_processed_candle_close_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    last_processed_candle_close_time,
+                    binance_symbol
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(canonical_symbol) DO UPDATE SET
                     side = excluded.side,
                     entry_price = excluded.entry_price,
@@ -348,7 +367,8 @@ class SnapshotStore:
                     cooldown_until_candle_close_time = excluded.cooldown_until_candle_close_time,
                     entry_atr = excluded.entry_atr,
                     highest_close = excluded.highest_close,
-                    last_processed_candle_close_time = excluded.last_processed_candle_close_time
+                    last_processed_candle_close_time = excluded.last_processed_candle_close_time,
+                    binance_symbol = excluded.binance_symbol
                 """,
                 (
                     canonical_symbol,
@@ -359,6 +379,7 @@ class SnapshotStore:
                     state.entry_atr,
                     state.highest_close,
                     state.last_processed_candle_close_time,
+                    state.binance_symbol,
                 ),
             )
 

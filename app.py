@@ -184,11 +184,6 @@ class MonitorApplication:
                         )
                     ),
                 }
-            elif not snapshot["complete"]:
-                snapshot["notification"] = {
-                    "status": "suppressed",
-                    "message": "数据源不完整，本轮不会推送企业微信消息。",
-                }
             else:
                 try:
                     trade_result = dispatch_trade_signals(
@@ -211,7 +206,36 @@ class MonitorApplication:
                         ),
                     }
                 else:
-                    if trade_result.failures:
+                    if not snapshot["complete"]:
+                        for failure in trade_result.failures:
+                            LOGGER.warning(
+                                "Incomplete snapshot active-position risk check failed for %s: %s",
+                                failure.canonical_symbol,
+                                failure.message,
+                            )
+                        snapshot["notification"] = {
+                            "status": "partial",
+                            "trade_signal_events": list(trade_result.events),
+                            "trade_signal_details": [
+                                detail.as_dict() for detail in trade_result.details
+                            ],
+                            "trade_condition_scans": [
+                                scan.as_dict() for scan in trade_result.scans
+                            ],
+                            "trade_signal_failures": [
+                                {
+                                    "canonical_symbol": failure.canonical_symbol,
+                                    "message": failure.message,
+                                }
+                                for failure in trade_result.failures
+                            ],
+                            "trade_condition_list_status": "suppressed",
+                            "message": (
+                                "数据源不完整：已暂停新开仓和交易条件列表推送；"
+                                "仍对已有交易状态执行 Binance 15m 风控。"
+                            ),
+                        }
+                    elif trade_result.failures:
                         for failure in trade_result.failures:
                             LOGGER.warning(
                                 "交易信号已跳过 %s：%s",

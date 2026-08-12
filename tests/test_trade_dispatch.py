@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from crypto_oi_monitor.http_client import DataSourceRequestError
 from crypto_oi_monitor.trade_dispatch import (
     EXIT_LONG,
+    NO_ADD,
     RESUME_LONG,
     REENTRY_COOLDOWN,
     STOP_LONG,
@@ -103,6 +104,18 @@ def _post_entry_candles() -> list[Candle]:
     return candles
 
 
+def _atr_exit_candles() -> list[Candle]:
+    candles = _long_setup_candles()
+    candles[-1] = Candle(
+        close_time=candles[-1].close_time,
+        high=99,
+        low=97,
+        close=97.5,
+        quote_volume=candles[-1].quote_volume,
+    )
+    return candles
+
+
 def _close_below_ema200_candles() -> list[Candle]:
     return _warm_candles([300 - index for index in range(201)], warmup_close=300)
 
@@ -159,6 +172,9 @@ class MemoryStore:
     def get_trade_signal_state(self, symbol: str) -> TradeSignalState | str | None:
         return self.states.get(symbol)
 
+    def list_trade_signal_states(self) -> dict[str, TradeSignalState | str]:
+        return dict(self.states)
+
     def set_trade_signal_state(self, symbol: str, state: TradeSignalState) -> None:
         self.states[symbol] = state
 
@@ -193,6 +209,13 @@ class RecordingNotifier:
                 cooldown_candles,
             )
         )
+
+
+class FailingTradeSignalNotifier(RecordingNotifier):
+    def send_trade_signal(
+        self, signal, comparison, previous_aggregate_oi_usd, event_type="long"
+    ) -> None:
+        raise RuntimeError("WeCom failed")
 
 
 class ConditionListStore:
@@ -246,6 +269,111 @@ def _condition_scan(symbol: str, status: str) -> TradeConditionScan:
 
 
 class TradeDispatchTests(unittest.TestCase):
+    def test_incomplete_snapshot_still_runs_active_position_exit_checks(self) -> None:
+        store = MemoryStore()
+        candles = _atr_exit_candles()
+        store.states["PEPE"] = TradeSignalState(
+            status="long",
+            entry_price=100,
+            stop_loss=98,
+            entry_atr=1,
+            highest_close=100,
+            last_processed_candle_close_time=899_999_999,
+        )
+        notifier = RecordingNotifier()
+        snapshot = {
+            "complete": False,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        result = _dispatch_trade_signals(
+            snapshot, None, lambda _: candles, store, notifier
+        )
+
+        self.assertEqual(result.events, (EXIT_LONG,))
+        self.assertIn("atr_stop_loss", result.details[0].reasons)
+
+    def test_cmc_outage_uses_persisted_binance_symbol_for_active_exit(self) -> None:
+        store = MemoryStore()
+        candles = _atr_exit_candles()
+        store.states["PEPE"] = TradeSignalState(
+            status="long",
+            entry_price=100,
+            stop_loss=98,
+            entry_atr=1,
+            highest_close=100,
+            last_processed_candle_close_time=899_999_999,
+            binance_symbol="PEPEUSDT",
+        )
+        notifier = RecordingNotifier()
+
+        result = _dispatch_trade_signals(
+            {"complete": False, "comparisons": []},
+            None,
+            lambda symbol: candles if symbol == "PEPEUSDT" else [],
+            store,
+            notifier,
+        )
+
+        self.assertEqual(result.events, (EXIT_LONG,))
+        self.assertIsNone(result.details[0].oi_to_market_cap)
+
+    def test_reports_legacy_active_state_without_a_persisted_binance_symbol(
+        self,
+    ) -> None:
+        store = MemoryStore()
+        store.states["PEPE"] = TradeSignalState(
+            status="long",
+            entry_price=100,
+            stop_loss=98,
+            entry_atr=1,
+            highest_close=100,
+        )
+
+        result = _dispatch_trade_signals(
+            {"complete": False, "comparisons": []},
+            None,
+            lambda _: self.fail("K-line loader must not receive a guessed symbol"),
+            store,
+            RecordingNotifier(),
+        )
+
+        self.assertEqual(result.events, ())
+        self.assertEqual(result.failures[0].canonical_symbol, "PEPE")
+        self.assertIn("Binance symbol is missing", result.failures[0].message)
+
+    def test_unmapped_no_add_state_does_not_attempt_resume_without_oi_data(self) -> None:
+        store = MemoryStore()
+        store.states["PEPE"] = TradeSignalState(
+            status=NO_ADD,
+            entry_price=100,
+            stop_loss=90,
+            entry_atr=1,
+            highest_close=100,
+            last_processed_candle_close_time=_long_setup_candles()[-1].close_time,
+            binance_symbol="PEPEUSDT",
+        )
+
+        result = _dispatch_trade_signals(
+            {"complete": True, "comparisons": []},
+            None,
+            lambda _: _long_setup_candles(),
+            store,
+            RecordingNotifier(),
+        )
+
+        self.assertEqual(result.events, ())
+        self.assertEqual(result.scans[0].status, STOP_LONG)
+        self.assertEqual(result.scans[0].reasons, ("data_source_incomplete",))
+        self.assertEqual(store.states["PEPE"].status, NO_ADD)
+
     def test_requires_exit_when_an_active_long_hits_its_atr_stop(self) -> None:
         store = MemoryStore()
         store.states["PEPE"] = TradeSignalState(
@@ -292,6 +420,43 @@ class TradeDispatchTests(unittest.TestCase):
             candles[-1].close_time
             + dynamic_cooldown_candles(candles) * FIFTEEN_MINUTES_MILLISECONDS,
         )
+
+    def test_mandatory_exit_takes_priority_over_oi_threshold_stop(self) -> None:
+        store = MemoryStore()
+        candles = _atr_exit_candles()
+        store.states["PEPE"] = TradeSignalState(
+            status="long",
+            entry_price=100,
+            stop_loss=98,
+            entry_atr=1,
+            highest_close=100,
+            last_processed_candle_close_time=899_999_999,
+        )
+        notifier = RecordingNotifier()
+        kline_calls = []
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 0.89,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        result = dispatch_trade_signals(
+            snapshot,
+            lambda _: (kline_calls.append("PEPEUSDT") or candles),
+            store,
+            notifier,
+        )
+
+        self.assertEqual(kline_calls, ["PEPEUSDT"])
+        self.assertEqual(result.events, (EXIT_LONG,))
+        self.assertIn("atr_stop_loss", result.details[0].reasons)
+        self.assertEqual(result.scans[0].status, EXIT_LONG)
 
     def test_trailing_stop_is_persisted_and_can_force_exit(self) -> None:
         store = MemoryStore()
@@ -357,6 +522,8 @@ class TradeDispatchTests(unittest.TestCase):
 
         self.assertEqual(result.events, (EXIT_LONG,))
         self.assertIn("trailing_take_profit", result.details[0].reasons)
+        self.assertEqual(result.scans[0].status, EXIT_LONG)
+        self.assertIn("trailing_take_profit", result.scans[0].reasons)
 
     def test_rejects_trailing_replay_when_binance_history_has_a_gap(self) -> None:
         store = MemoryStore()
@@ -426,6 +593,34 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(expired.events, ())
         self.assertEqual(notifier.signals, [])
         self.assertIsNone(store.get_trade_signal_state("PEPE"))
+
+    def test_active_cooldown_is_not_reported_as_can_long(self) -> None:
+        store = MemoryStore()
+        notifier = RecordingNotifier()
+        candles = _long_setup_candles()
+        store.states["PEPE"] = TradeSignalState(
+            status=REENTRY_COOLDOWN,
+            cooldown_until_candle_close_time=(
+                candles[-1].close_time + 4 * FIFTEEN_MINUTES_MILLISECONDS
+            ),
+        )
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        result = dispatch_trade_signals(snapshot, lambda _: candles, store, notifier)
+
+        self.assertEqual(result.events, ())
+        self.assertEqual(result.scans[0].status, STOP_LONG)
+        self.assertEqual(result.scans[0].reasons, ("reentry_cooldown_active",))
 
     def test_sends_current_lists_when_new_condition_symbols_appear(self) -> None:
         now = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
@@ -644,6 +839,43 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
         self.assertGreater(notifier.stop_longs[0][1].rsi, 60)
 
+    def test_failed_resume_notification_keeps_no_add_state(self) -> None:
+        store = MemoryStore()
+        candles = _second_long_setup_candles()
+        previous_state = TradeSignalState(
+            status="no_add",
+            entry_price=100.5,
+            stop_loss=90,
+            entry_atr=1,
+            highest_close=100.5,
+            last_processed_candle_close_time=candles[-1].close_time,
+        )
+        store.states["PEPE"] = previous_state
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "WeCom failed"):
+            dispatch_trade_signals(
+                snapshot,
+                lambda _: candles,
+                store,
+                FailingTradeSignalNotifier(),
+            )
+
+        persisted = store.get_trade_signal_state("PEPE")
+        self.assertEqual(persisted.status, NO_ADD)
+        self.assertEqual(persisted.entry_price, previous_state.entry_price)
+        self.assertEqual(persisted.binance_symbol, "PEPEUSDT")
+
     def test_requires_oi_to_market_cap_strictly_above_90_percent(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()
@@ -766,6 +998,35 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.events, ())
         self.assertEqual(store.states["PEPE"].status, "long")
         self.assertEqual(notifier.stop_longs, [])
+        self.assertEqual(result.scans[0].status, "can_long")
+        self.assertEqual(result.scans[0].reasons, ())
+
+    def test_incomplete_snapshot_pauses_additions_for_healthy_active_long(self) -> None:
+        store = MemoryStore()
+        store.states["PEPE"] = TradeSignalState("long", 100.5, 90)
+        snapshot = {
+            "complete": False,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        result = _dispatch_trade_signals(
+            snapshot,
+            None,
+            lambda _: _post_entry_candles(),
+            store,
+            RecordingNotifier(),
+        )
+
+        self.assertEqual(result.events, ())
+        self.assertEqual(result.scans[0].status, STOP_LONG)
+        self.assertEqual(result.scans[0].reasons, ("data_source_incomplete",))
 
     def test_does_not_scan_assets_at_exactly_90_percent(self) -> None:
         snapshot = {
@@ -962,6 +1223,12 @@ class TradeDispatchTests(unittest.TestCase):
         )
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
         self.assertEqual(store.states["PEPE"].status, "no_add")
+        self.assertEqual(len(result.scans), 1)
+        self.assertEqual(result.scans[0].status, STOP_LONG)
+        self.assertEqual(
+            result.scans[0].reasons,
+            ("oi_to_market_cap_not_above_90",),
+        )
 
     def test_stops_active_long_for_oi_threshold_when_kline_load_fails(self) -> None:
         store = MemoryStore()
@@ -986,7 +1253,8 @@ class TradeDispatchTests(unittest.TestCase):
         )
 
         self.assertEqual(result.events, ("stop_long",))
-        self.assertEqual(result.failures, ())
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn("Binance timed out", result.failures[0].message)
         self.assertEqual(
             result.details[0].reasons, ("oi_to_market_cap_not_above_90",)
         )
@@ -994,7 +1262,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
         self.assertEqual(store.states["PEPE"].status, "no_add")
 
-    def test_sends_oi_threshold_stop_before_loading_other_trade_candles(self) -> None:
+    def test_loads_risk_candles_before_sending_oi_threshold_stop(self) -> None:
         store = MemoryStore()
         store.states["PEPE"] = "long"
         notifier = RecordingNotifier()
@@ -1014,16 +1282,17 @@ class TradeDispatchTests(unittest.TestCase):
             ],
         }
 
+        loaded_symbols = []
+
         def load(symbol: str):
-            self.assertEqual(notifier.stop_longs, [("PEPE", None, ("oi_to_market_cap_not_above_90",))])
-            self.assertEqual(store.states["PEPE"].status, "no_add")
-            self.assertEqual(symbol, "DOGEUSDT")
-            return _candles([100] * 1001)
+            loaded_symbols.append(symbol)
+            return _rsi_above_60_candles()
 
         result = dispatch_trade_signals(snapshot, load, store, notifier)
 
         self.assertEqual(result.events, ("stop_long",))
         self.assertEqual(result.failures, ())
+        self.assertCountEqual(loaded_symbols, ["PEPEUSDT", "DOGEUSDT"])
 
     def test_stops_active_long_when_rsi_reaches_60(self) -> None:
         store = MemoryStore()
