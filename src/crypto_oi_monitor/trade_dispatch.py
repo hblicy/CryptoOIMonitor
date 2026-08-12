@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import logging
 from typing import Any, Callable, Protocol
 
 from .domain import TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO
@@ -14,10 +15,12 @@ from .trading import (
     TradeIndicators,
     TradeSetup,
     entry_reasons,
+    dynamic_cooldown_candles,
     evaluate_trade_setup,
     exit_reasons,
     stop_long_reasons,
     trade_indicators,
+    update_trailing_stop,
 )
 
 
@@ -26,11 +29,12 @@ LEGACY_SHORT_STATE = "short"
 STOP_LONG = "stop_long"
 CAN_LONG = "can_long"
 EXIT_LONG = "exit_long"
+RESUME_LONG = "resume_long"
 KLINE_ERROR = "kline_error"
 NO_ADD = "no_add"
 REENTRY_COOLDOWN = "reentry_cooldown"
-REENTRY_COOLDOWN_CANDLES = 4
 TRADE_CONDITION_LIST_INTERVAL = timedelta(hours=1)
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,9 @@ class TradeSignalState:
     entry_price: float | None = None
     stop_loss: float | None = None
     cooldown_until_candle_close_time: int | None = None
+    entry_atr: float | None = None
+    highest_close: float | None = None
+    last_processed_candle_close_time: int | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,11 @@ class TradeSignalEvent:
     previous_quote_volume: float | None = None
     aggregate_oi_usd: float | None = None
     previous_aggregate_oi_usd: float | None = None
+    ema200_slope_reference: float | None = None
+    average_quote_volume: float | None = None
+    adjusted_aggregate_oi: float | None = None
+    previous_adjusted_aggregate_oi: float | None = None
+    cooldown_candles: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -88,6 +100,11 @@ class TradeSignalEvent:
             "previous_quote_volume": self.previous_quote_volume,
             "aggregate_oi_usd": self.aggregate_oi_usd,
             "previous_aggregate_oi_usd": self.previous_aggregate_oi_usd,
+            "ema200_slope_reference": self.ema200_slope_reference,
+            "average_quote_volume": self.average_quote_volume,
+            "adjusted_aggregate_oi": self.adjusted_aggregate_oi,
+            "previous_adjusted_aggregate_oi": self.previous_adjusted_aggregate_oi,
+            "cooldown_candles": self.cooldown_candles,
         }
 
 
@@ -109,6 +126,10 @@ class TradeConditionScan:
     previous_quote_volume: float | None = None
     aggregate_oi_usd: float | None = None
     previous_aggregate_oi_usd: float | None = None
+    ema200_slope_reference: float | None = None
+    average_quote_volume: float | None = None
+    adjusted_aggregate_oi: float | None = None
+    previous_adjusted_aggregate_oi: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -128,6 +149,10 @@ class TradeConditionScan:
             "previous_quote_volume": self.previous_quote_volume,
             "aggregate_oi_usd": self.aggregate_oi_usd,
             "previous_aggregate_oi_usd": self.previous_aggregate_oi_usd,
+            "ema200_slope_reference": self.ema200_slope_reference,
+            "average_quote_volume": self.average_quote_volume,
+            "adjusted_aggregate_oi": self.adjusted_aggregate_oi,
+            "previous_adjusted_aggregate_oi": self.previous_adjusted_aggregate_oi,
         }
 
 
@@ -187,6 +212,7 @@ class TradeSignalNotifier(Protocol):
         signal: TradeSetup,
         comparison: dict[str, Any],
         previous_aggregate_oi_usd: float,
+        event_type: str,
     ) -> None: ...
 
     def send_stop_long(
@@ -202,6 +228,7 @@ class TradeSignalNotifier(Protocol):
         indicators: TradeIndicators,
         state: TradeSignalState,
         reasons: tuple[str, ...],
+        cooldown_candles: int,
     ) -> None: ...
 
 
@@ -297,7 +324,7 @@ def dispatch_trade_signals(
     details: list[TradeSignalEvent] = []
     for comparison, state in oi_threshold_stops:
         canonical_symbol = comparison["canonical_symbol"]
-        reasons = ("oi_to_market_cap_not_above_100",)
+        reasons = ("oi_to_market_cap_not_above_90",)
         notifier.send_stop_long(comparison, None, reasons)
         store.set_trade_signal_state(
             canonical_symbol,
@@ -305,6 +332,11 @@ def dispatch_trade_signals(
                 status=NO_ADD,
                 entry_price=state.entry_price,
                 stop_loss=state.stop_loss,
+                entry_atr=state.entry_atr,
+                highest_close=state.highest_close,
+                last_processed_candle_close_time=(
+                    state.last_processed_candle_close_time
+                ),
             ),
         )
         dispatched.append(STOP_LONG)
@@ -343,14 +375,113 @@ def dispatch_trade_signals(
             store.clear_trade_signal_state(canonical_symbol)
             state = None
         if state is not None:
+            if (
+                state.entry_price is not None
+                and state.stop_loss is not None
+                and state.entry_atr is not None
+                and state.highest_close is not None
+            ):
+                if state.last_processed_candle_close_time is None:
+                    LOGGER.warning(
+                        "Trailing history start is unknown for migrated state %s; continuing from candle %s",
+                        canonical_symbol,
+                        indicators.candle_close_time,
+                    )
+                    unprocessed_candles = [candles[-1]]
+                else:
+                    if (
+                        state.last_processed_candle_close_time
+                        > indicators.candle_close_time
+                    ):
+                        raise ValueError(
+                            "Stored trailing candle time is newer than Binance closed K-line "
+                            f"for {canonical_symbol}"
+                        )
+                    unprocessed_candles = [
+                        candle
+                        for candle in candles
+                        if candle.close_time
+                        > state.last_processed_candle_close_time
+                    ]
+                    if unprocessed_candles:
+                        expected_first_close_time = (
+                            state.last_processed_candle_close_time
+                            + FIFTEEN_MINUTES_MILLISECONDS
+                        )
+                        has_gap = (
+                            unprocessed_candles[0].close_time
+                            != expected_first_close_time
+                            or any(
+                                current.close_time - previous.close_time
+                                != FIFTEEN_MINUTES_MILLISECONDS
+                                for previous, current in zip(
+                                    unprocessed_candles,
+                                    unprocessed_candles[1:],
+                                )
+                            )
+                        )
+                        if has_gap:
+                            raise ValueError(
+                                "Binance closed K-line history does not cover the "
+                                f"trailing replay gap for {canonical_symbol}"
+                            )
+                next_highest_close = state.highest_close
+                next_stop_loss = state.stop_loss
+                for candle in unprocessed_candles:
+                    next_highest_close, next_stop_loss = update_trailing_stop(
+                        state.entry_price,
+                        state.entry_atr,
+                        next_stop_loss,
+                        next_highest_close,
+                        candle.close,
+                    )
+                if next_stop_loss > state.stop_loss:
+                    LOGGER.info(
+                        "Raised %s active protection from %.8f to %.8f at closed candle %s",
+                        canonical_symbol,
+                        state.stop_loss,
+                        next_stop_loss,
+                        indicators.candle_close_time,
+                    )
+                state = TradeSignalState(
+                    status=state.status,
+                    entry_price=state.entry_price,
+                    stop_loss=next_stop_loss,
+                    cooldown_until_candle_close_time=(
+                        state.cooldown_until_candle_close_time
+                    ),
+                    entry_atr=state.entry_atr,
+                    highest_close=next_highest_close,
+                    last_processed_candle_close_time=(
+                        state.last_processed_candle_close_time
+                        if not unprocessed_candles
+                        else unprocessed_candles[-1].close_time
+                    ),
+                )
+                store.set_trade_signal_state(canonical_symbol, state)
             forced_exit_reasons = (
-                exit_reasons(candles, indicators, state.stop_loss)
+                exit_reasons(
+                    candles,
+                    indicators,
+                    state.stop_loss,
+                    state.entry_price,
+                )
                 if state.stop_loss is not None
                 else ()
             )
             if forced_exit_reasons:
+                cooldown_candles = dynamic_cooldown_candles(candles)
+                LOGGER.info(
+                    "Selected %s closed 15m candles for %s dynamic cooldown",
+                    cooldown_candles,
+                    canonical_symbol,
+                )
                 notifier.send_exit_long(
-                    comparison, indicators, state, forced_exit_reasons
+                    comparison,
+                    indicators,
+                    state,
+                    forced_exit_reasons,
+                    cooldown_candles,
                 )
                 store.set_trade_signal_state(
                     canonical_symbol,
@@ -358,7 +489,7 @@ def dispatch_trade_signals(
                         status=REENTRY_COOLDOWN,
                         cooldown_until_candle_close_time=(
                             indicators.candle_close_time
-                            + REENTRY_COOLDOWN_CANDLES
+                            + cooldown_candles
                             * FIFTEEN_MINUTES_MILLISECONDS
                         ),
                     ),
@@ -377,6 +508,7 @@ def dispatch_trade_signals(
                         stop_loss=state.stop_loss,
                         atr=indicators.atr,
                         reasons=forced_exit_reasons,
+                        cooldown_candles=cooldown_candles,
                     )
                 )
                 continue
@@ -389,6 +521,11 @@ def dispatch_trade_signals(
                         status=NO_ADD,
                         entry_price=state.entry_price,
                         stop_loss=state.stop_loss,
+                        entry_atr=state.entry_atr,
+                        highest_close=state.highest_close,
+                        last_processed_candle_close_time=(
+                            state.last_processed_candle_close_time
+                        ),
                     ),
                 )
                 dispatched.append(STOP_LONG)
@@ -407,21 +544,29 @@ def dispatch_trade_signals(
                 continue
             if state.status == LONG:
                 continue
-            entry_blockers = _aggregate_oi_entry_reasons(comparison, reference_oi)
+            entry_blockers = _aggregate_oi_entry_reasons(
+                comparison, reference_oi, indicators
+            )
             entry_blockers += entry_reasons(indicators)
             if entry_blockers:
                 continue
+            signal_event_type = RESUME_LONG
             store.clear_trade_signal_state(canonical_symbol)
+        else:
+            signal_event_type = LONG
         if comparison["oi_to_market_cap"] <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO:
             continue
-        if _aggregate_oi_entry_reasons(comparison, reference_oi):
+        if _aggregate_oi_entry_reasons(comparison, reference_oi, indicators):
             continue
         signal = evaluate_trade_setup(candles)
         if signal is None:
             continue
         previous_aggregate_oi_usd = reference_oi[canonical_symbol]
         notifier.send_trade_signal(
-            signal, comparison, previous_aggregate_oi_usd
+            signal,
+            comparison,
+            previous_aggregate_oi_usd,
+            signal_event_type,
         )
         store.set_trade_signal_state(
             canonical_symbol,
@@ -429,12 +574,21 @@ def dispatch_trade_signals(
                 status=signal.side,
                 entry_price=signal.entry_price,
                 stop_loss=signal.stop_loss,
+                entry_atr=signal.atr,
+                highest_close=signal.entry_price,
+                last_processed_candle_close_time=signal.candle_close_time,
             ),
         )
-        dispatched.append(signal.side)
+        if signal_event_type == RESUME_LONG:
+            LOGGER.info(
+                "Resumed long signal for %s at closed candle %s",
+                canonical_symbol,
+                signal.candle_close_time,
+            )
+        dispatched.append(signal_event_type)
         details.append(
             TradeSignalEvent(
-                event_type=signal.side,
+                event_type=signal_event_type,
                 canonical_symbol=canonical_symbol,
                 candle_close_time=signal.candle_close_time,
                 rsi=signal.rsi,
@@ -451,6 +605,14 @@ def dispatch_trade_signals(
                 previous_quote_volume=signal.previous_quote_volume,
                 aggregate_oi_usd=comparison["total_oi_usd"],
                 previous_aggregate_oi_usd=previous_aggregate_oi_usd,
+                ema200_slope_reference=signal.ema200_slope_reference,
+                average_quote_volume=signal.average_quote_volume,
+                adjusted_aggregate_oi=(
+                    comparison["total_oi_usd"] / signal.entry_price
+                ),
+                previous_adjusted_aggregate_oi=(
+                    previous_aggregate_oi_usd / signal.previous_close
+                ),
             )
         )
     return TradeSignalDispatchResult(
@@ -588,7 +750,7 @@ def _scan_trade_condition(
     indicators = trade_indicators(candles)
     forced_exit_reasons = exit_reasons(candles, indicators, None)
     reasons = forced_exit_reasons or (
-        _aggregate_oi_entry_reasons(comparison, reference_oi)
+        _aggregate_oi_entry_reasons(comparison, reference_oi, indicators)
         + entry_reasons(indicators)
     )
     return TradeConditionScan(
@@ -615,6 +777,17 @@ def _scan_trade_condition(
         previous_aggregate_oi_usd=reference_oi.get(
             comparison["canonical_symbol"]
         ),
+        ema200_slope_reference=indicators.ema200_slope_reference,
+        average_quote_volume=indicators.average_quote_volume,
+        adjusted_aggregate_oi=(
+            float(comparison["total_oi_usd"]) / indicators.close
+        ),
+        previous_adjusted_aggregate_oi=(
+            None
+            if reference_oi.get(comparison["canonical_symbol"]) is None
+            else reference_oi[comparison["canonical_symbol"]]
+            / indicators.previous_close
+        ),
     )
 
 
@@ -632,11 +805,15 @@ def _reference_oi_by_symbol(
 
 
 def _aggregate_oi_entry_reasons(
-    comparison: dict[str, Any], reference_oi: dict[str, float]
+    comparison: dict[str, Any],
+    reference_oi: dict[str, float],
+    indicators: TradeIndicators,
 ) -> tuple[str, ...]:
     previous_oi = reference_oi.get(comparison["canonical_symbol"])
     if previous_oi is None:
         return ("aggregate_oi_history_unavailable",)
-    if float(comparison["total_oi_usd"]) <= previous_oi:
-        return ("aggregate_oi_not_increasing",)
+    current_units = float(comparison["total_oi_usd"]) / indicators.close
+    previous_units = previous_oi / indicators.previous_close
+    if current_units <= previous_units:
+        return ("aggregate_oi_not_increasing_after_price_adjustment",)
     return ()

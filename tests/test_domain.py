@@ -5,6 +5,7 @@ from crypto_oi_monitor.domain import (
     NORMAL,
     WARNING,
     ContractOpenInterest,
+    TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO,
     aggregate_asset,
     is_binance_universe_member,
     risk_status,
@@ -12,6 +13,9 @@ from crypto_oi_monitor.domain import (
 
 
 class RiskStatusTests(unittest.TestCase):
+    def test_uses_ninety_percent_for_trade_entry(self) -> None:
+        self.assertEqual(TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO, 0.9)
+
     def test_marks_oi_above_110_percent_as_warning(self) -> None:
         self.assertEqual(risk_status(1.1), NORMAL)
         self.assertEqual(risk_status(1.100001), WARNING)

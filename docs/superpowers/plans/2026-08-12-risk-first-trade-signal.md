@@ -4,7 +4,7 @@
 
 **Goal:** Implement the approved 90% OI/market-cap entry threshold, EMA200 slope, RSI below 60, volume breakout, price-adjusted OI growth, resume-long signal, trailing profit protection, and ATR-adaptive cooldown.
 
-**Architecture:** Extend the pure indicator functions in `trading.py`, then let `trade_dispatch.py` own the persisted signal state machine. Store entry ATR and the highest closed price in SQLite so trailing protection survives restarts; expose the new audit fields through the existing API model and render them with the existing dashboard components.
+**Architecture:** Extend the pure indicator functions in `trading.py`, then let `trade_dispatch.py` own the persisted signal state machine. Store entry ATR, the highest closed price, and the last processed closed-candle time in SQLite so trailing protection survives restarts and catches up missed candles; expose the new audit fields through the existing API model and render them with the existing dashboard components.
 
 **Tech Stack:** Python 3 standard library, SQLite, `unittest`, React/Vite, Vitest.
 
@@ -154,11 +154,11 @@ def update_trailing_stop(entry_price, entry_atr, stop_loss, highest_close, close
     return next_high, max(stop_loss, entry_price + entry_atr, next_high - 2 * entry_atr)
 ```
 
-Compute the current normalized ATR and the median of the preceding 96 normalized ATR values. Return 3, 4, or 6 candles using the approved inclusive boundaries. Extend `TradeSignalState` with `entry_atr` and `highest_close`; update the state before evaluating active-stop exits. Emit `trailing_take_profit` when the active protection price is above entry.
+Compute the current normalized ATR and the median of the preceding 96 normalized ATR values. Return 3, 4, or 6 candles using the approved inclusive boundaries. Extend `TradeSignalState` with `entry_atr`, `highest_close`, and `last_processed_candle_close_time`; replay every fetched closed candle after the stored time before evaluating active-stop exits. Emit `trailing_take_profit` when the active protection price is above entry.
 
 - [ ] **Step 4: Verify state-machine behavior**
 
-Test that the protection price never falls, repeated refreshes are idempotent, a trailing exit enters the computed cooldown, and the cooldown end still requires a full new entry signal.
+Test that the protection price never falls, repeated refreshes are idempotent, closed candles missed during service downtime are replayed, incomplete replay history fails explicitly, a trailing exit enters the computed cooldown, and the cooldown end still requires a full new entry signal.
 
 - [ ] **Step 5: Run focused tests and verify GREEN**
 
@@ -175,12 +175,12 @@ Run `python -m unittest tests.test_trading tests.test_trade_dispatch -v` and exp
 Add a round-trip assertion:
 
 ```python
-state = TradeSignalState("long", 100, 96, None, 2, 106)
+state = TradeSignalState("long", 100, 96, None, 2, 106, 1234)
 store.set_trade_signal_state("ETH", state)
 self.assertEqual(store.get_trade_signal_state("ETH"), state)
 ```
 
-Create a legacy table without `entry_atr` and `highest_close`, insert a valid old long state, initialize `SnapshotStore`, and assert migration derives `entry_atr == 2` and `highest_close == 100`. Add an invalid legacy stop test that clears the state and logs a warning.
+Create a legacy table without `entry_atr`, `highest_close`, and `last_processed_candle_close_time`, insert a valid old long state, initialize `SnapshotStore`, and assert migration derives `entry_atr == 2`, initializes `highest_close == 100`, and leaves the unknown last-processed time null. Add an invalid legacy stop test that clears the state and logs a warning.
 
 - [ ] **Step 2: Run storage tests and verify RED**
 
@@ -188,7 +188,7 @@ Run `python -m unittest tests.test_storage -v`; expect schema and dataclass fail
 
 - [ ] **Step 3: Implement additive SQLite migration**
 
-Add nullable REAL columns `entry_atr` and `highest_close`. Include them in SELECT, INSERT, and conflict UPDATE statements. For old active states derive `(entry_price - stop_loss) / 2`; reject non-positive values, initialize `highest_close` from entry price, persist the migrated values, and log the migration without sensitive data.
+Add nullable REAL columns `entry_atr` and `highest_close`, plus nullable INTEGER `last_processed_candle_close_time`. Include them in SELECT, INSERT, and conflict UPDATE statements. For old active states derive `(entry_price - stop_loss) / 2`; reject non-positive values, initialize `highest_close` from entry price, leave the unknowable last-processed time null, persist the migrated values, and log the migration without sensitive data.
 
 - [ ] **Step 4: Run storage tests and verify GREEN**
 

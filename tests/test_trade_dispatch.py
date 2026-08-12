@@ -6,16 +6,22 @@ from types import SimpleNamespace
 from crypto_oi_monitor.http_client import DataSourceRequestError
 from crypto_oi_monitor.trade_dispatch import (
     EXIT_LONG,
+    RESUME_LONG,
     REENTRY_COOLDOWN,
-    REENTRY_COOLDOWN_CANDLES,
     STOP_LONG,
     TradeSignalState,
     TradeConditionScan,
+    _aggregate_oi_entry_reasons,
     dispatch_trade_condition_list,
     dispatch_trade_signals as _dispatch_trade_signals,
     scan_trade_conditions as _scan_trade_conditions,
 )
-from crypto_oi_monitor.trading import Candle, FIFTEEN_MINUTES_MILLISECONDS
+from crypto_oi_monitor.trading import (
+    Candle,
+    FIFTEEN_MINUTES_MILLISECONDS,
+    TradeIndicators,
+    dynamic_cooldown_candles,
+)
 
 
 def _candles(
@@ -41,18 +47,45 @@ def _warm_candles(closes: list[float], warmup_close: float = 100) -> list[Candle
 def _long_setup_candles() -> list[Candle]:
     closes = (
         [100] * 950
-        + [100 + (index % 2) * 2 for index in range(49)]
-        + [95, 100.5]
+        + [100 + (index % 2) * 2 for index in range(45)]
+        + [97, 98, 102, 102, 100, 100.5]
     )
-    return _candles(closes, [100] * 1000 + [120])
+    return _candles(closes, [100] * 1000 + [121])
 
 
-def _rsi_above_50_candles() -> list[Candle]:
-    return _warm_candles(
-        [100 + index for index in range(200)]
-        + [298 - index for index in range(60)]
-        + [260]
-    )
+def _rsi_above_60_candles() -> list[Candle]:
+    candles = _long_setup_candles()
+    for index in range(9):
+        previous = candles[-1]
+        close = 100.5 + (index + 1) * 0.5
+        candles.append(
+            Candle(
+                close_time=previous.close_time + FIFTEEN_MINUTES_MILLISECONDS,
+                high=close + 1,
+                low=close - 1,
+                close=close,
+                quote_volume=100,
+            )
+        )
+    return candles
+
+
+def _second_long_setup_candles() -> list[Candle]:
+    candles = _rsi_above_60_candles()
+    for index, close in enumerate(
+        [99.85, 106.61, 104.84, 97.52, 105.47, 107.15, 100.72, 97.12, 105.68]
+    ):
+        previous = candles[-1]
+        candles.append(
+            Candle(
+                close_time=previous.close_time + FIFTEEN_MINUTES_MILLISECONDS,
+                high=close + 1,
+                low=close - 1,
+                close=close,
+                quote_volume=130 if index == 8 else 100,
+            )
+        )
+    return candles
 
 
 def _post_entry_candles() -> list[Candle]:
@@ -139,17 +172,26 @@ class RecordingNotifier:
         self.stop_longs = []
         self.exit_longs = []
 
-    def send_trade_signal(self, signal, comparison, previous_aggregate_oi_usd) -> None:
+    def send_trade_signal(
+        self, signal, comparison, previous_aggregate_oi_usd, event_type="long"
+    ) -> None:
         self.signals.append(
-            (signal.side, comparison["canonical_symbol"], previous_aggregate_oi_usd)
+            (event_type, comparison["canonical_symbol"], previous_aggregate_oi_usd)
         )
 
     def send_stop_long(self, comparison, indicators, reasons) -> None:
         self.stop_longs.append((comparison["canonical_symbol"], indicators, reasons))
 
-    def send_exit_long(self, comparison, indicators, state, reasons) -> None:
+    def send_exit_long(
+        self, comparison, indicators, state, reasons, cooldown_candles
+    ) -> None:
         self.exit_longs.append(
-            (comparison["canonical_symbol"], indicators.close, state.stop_loss)
+            (
+                comparison["canonical_symbol"],
+                indicators.close,
+                state.stop_loss,
+                cooldown_candles,
+            )
         )
 
 
@@ -210,6 +252,9 @@ class TradeDispatchTests(unittest.TestCase):
             status="long",
             entry_price=100,
             stop_loss=98,
+            entry_atr=1,
+            highest_close=100,
+            last_processed_candle_close_time=899_999_999,
         )
         notifier = RecordingNotifier()
         snapshot = {
@@ -236,14 +281,151 @@ class TradeDispatchTests(unittest.TestCase):
 
         self.assertEqual(result.events, (EXIT_LONG,))
         self.assertIn("atr_stop_loss", result.details[0].reasons)
-        self.assertEqual(notifier.exit_longs, [("PEPE", 97.5, 98)])
+        self.assertEqual(
+            notifier.exit_longs,
+            [("PEPE", 97.5, 98, dynamic_cooldown_candles(candles))],
+        )
         state = store.get_trade_signal_state("PEPE")
         self.assertEqual(state.status, REENTRY_COOLDOWN)
         self.assertEqual(
             state.cooldown_until_candle_close_time,
             candles[-1].close_time
-            + REENTRY_COOLDOWN_CANDLES * FIFTEEN_MINUTES_MILLISECONDS,
+            + dynamic_cooldown_candles(candles) * FIFTEEN_MINUTES_MILLISECONDS,
         )
+
+    def test_trailing_stop_is_persisted_and_can_force_exit(self) -> None:
+        store = MemoryStore()
+        notifier = RecordingNotifier()
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+        profit_candles = _long_setup_candles()
+        store.states["PEPE"] = TradeSignalState(
+            status="long",
+            entry_price=100,
+            stop_loss=96,
+            entry_atr=2,
+            highest_close=100,
+            last_processed_candle_close_time=profit_candles[-1].close_time,
+        )
+        previous = profit_candles[-1]
+        profit_candles.append(Candle(
+            close_time=previous.close_time + FIFTEEN_MINUTES_MILLISECONDS,
+            high=107,
+            low=105,
+            close=106,
+            quote_volume=100,
+        ))
+        previous = profit_candles[-1]
+        profit_candles.append(Candle(
+            close_time=previous.close_time + FIFTEEN_MINUTES_MILLISECONDS,
+            high=106,
+            low=104,
+            close=105,
+            quote_volume=100,
+        ))
+
+        dispatch_trade_signals(snapshot, lambda _: profit_candles, store, notifier)
+
+        protected = store.get_trade_signal_state("PEPE")
+        self.assertEqual(protected.stop_loss, 102)
+        self.assertEqual(protected.highest_close, 106)
+        self.assertEqual(
+            protected.last_processed_candle_close_time,
+            profit_candles[-1].close_time,
+        )
+
+        exit_candles = list(profit_candles)
+        exit_candles[-1] = Candle(
+            close_time=profit_candles[-1].close_time + FIFTEEN_MINUTES_MILLISECONDS,
+            high=103,
+            low=100,
+            close=101,
+            quote_volume=100,
+        )
+        result = dispatch_trade_signals(
+            snapshot, lambda _: exit_candles, store, notifier
+        )
+
+        self.assertEqual(result.events, (EXIT_LONG,))
+        self.assertIn("trailing_take_profit", result.details[0].reasons)
+
+    def test_rejects_trailing_replay_when_binance_history_has_a_gap(self) -> None:
+        store = MemoryStore()
+        notifier = RecordingNotifier()
+        candles = _long_setup_candles()
+        store.states["PEPE"] = TradeSignalState(
+            status="long",
+            entry_price=100,
+            stop_loss=96,
+            entry_atr=2,
+            highest_close=100,
+            last_processed_candle_close_time=(
+                candles[0].close_time - 2 * FIFTEEN_MINUTES_MILLISECONDS
+            ),
+        )
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "does not cover the trailing replay gap"):
+            dispatch_trade_signals(snapshot, lambda _: candles, store, notifier)
+
+    def test_expired_cooldown_still_requires_a_new_ema200_cross(self) -> None:
+        store = MemoryStore()
+        notifier = RecordingNotifier()
+        candles = _long_setup_candles()
+        next_close_time = (
+            candles[-1].close_time + FIFTEEN_MINUTES_MILLISECONDS
+        )
+        store.states["PEPE"] = TradeSignalState(
+            status=REENTRY_COOLDOWN,
+            cooldown_until_candle_close_time=next_close_time,
+        )
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        blocked = dispatch_trade_signals(snapshot, lambda _: candles, store, notifier)
+        candles.append(
+            Candle(
+                close_time=next_close_time,
+                high=101.6,
+                low=99.6,
+                close=100.6,
+                quote_volume=130,
+            )
+        )
+        expired = dispatch_trade_signals(snapshot, lambda _: candles, store, notifier)
+
+        self.assertEqual(blocked.events, ())
+        self.assertEqual(expired.events, ())
+        self.assertEqual(notifier.signals, [])
+        self.assertIsNone(store.get_trade_signal_state("PEPE"))
 
     def test_sends_current_lists_when_new_condition_symbols_appear(self) -> None:
         now = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
@@ -417,7 +599,7 @@ class TradeDispatchTests(unittest.TestCase):
 
         self.assertIs(store.state, previous_state)
 
-    def test_sends_one_long_signal_until_rsi_returns_to_50(self) -> None:
+    def test_sends_one_long_signal_until_rsi_reaches_60(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()
         snapshot = {
@@ -438,10 +620,10 @@ class TradeDispatchTests(unittest.TestCase):
             snapshot, lambda _: _long_setup_candles(), store, notifier
         )
         stopped = dispatch_trade_signals(
-            snapshot, lambda _: _rsi_above_50_candles(), store, notifier
+            snapshot, lambda _: _rsi_above_60_candles(), store, notifier
         )
         reentered = dispatch_trade_signals(
-            snapshot, lambda _: _long_setup_candles(), store, notifier
+            snapshot, lambda _: _second_long_setup_candles(), store, notifier
         )
 
         self.assertEqual(first.events, ("long",))
@@ -452,16 +634,17 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(repeated.events, ())
         self.assertEqual(stopped.events, ("stop_long",))
         self.assertEqual(stopped.details[0].event_type, "stop_long")
-        self.assertEqual(stopped.details[0].reasons, ("rsi_not_below_50",))
-        self.assertEqual(reentered.events, ("long",))
+        self.assertEqual(stopped.details[0].reasons, ("rsi_not_below_60",))
+        self.assertEqual(reentered.events, (RESUME_LONG,))
+        self.assertEqual(reentered.details[0].event_type, RESUME_LONG)
         self.assertEqual(
             notifier.signals,
-            [("long", "PEPE", 90), ("long", "PEPE", 90)],
+            [("long", "PEPE", 90), (RESUME_LONG, "PEPE", 90)],
         )
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
-        self.assertGreater(notifier.stop_longs[0][1].rsi, 50)
+        self.assertGreater(notifier.stop_longs[0][1].rsi, 60)
 
-    def test_requires_oi_to_market_cap_strictly_above_100_percent(self) -> None:
+    def test_requires_oi_to_market_cap_strictly_above_90_percent(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()
         snapshot = {
@@ -469,7 +652,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.0,
+                    "oi_to_market_cap": 0.9,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -479,6 +662,36 @@ class TradeDispatchTests(unittest.TestCase):
 
         self.assertEqual(result.events, ())
         self.assertEqual(notifier.signals, [])
+
+    def test_requires_price_adjusted_aggregate_oi_to_increase(self) -> None:
+        indicators = TradeIndicators(
+            candle_close_time=1,
+            previous_close=100,
+            close=110,
+            rsi=40,
+            previous_rsi=39,
+            ema200=100,
+            previous_ema200=100,
+            ema200_slope_reference=99,
+            atr=2,
+            quote_volume=121,
+            previous_quote_volume=100,
+            average_quote_volume=100,
+        )
+
+        reasons = _aggregate_oi_entry_reasons(
+            {
+                "canonical_symbol": "PEPE",
+                "total_oi_usd": 110,
+            },
+            {"PEPE": 100},
+            indicators,
+        )
+
+        self.assertEqual(
+            reasons,
+            ("aggregate_oi_not_increasing_after_price_adjustment",),
+        )
 
     def test_requires_aggregate_oi_to_increase_from_15_minutes_ago(self) -> None:
         snapshot = {
@@ -500,7 +713,8 @@ class TradeDispatchTests(unittest.TestCase):
 
         self.assertEqual(result.scans[0].status, STOP_LONG)
         self.assertEqual(
-            result.scans[0].reasons, ("aggregate_oi_not_increasing",)
+            result.scans[0].reasons,
+            ("aggregate_oi_not_increasing_after_price_adjustment",),
         )
 
     def test_marks_missing_aggregate_oi_history_as_stop_long(self) -> None:
@@ -553,13 +767,13 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(store.states["PEPE"].status, "long")
         self.assertEqual(notifier.stop_longs, [])
 
-    def test_does_not_scan_assets_at_exactly_100_percent(self) -> None:
+    def test_does_not_scan_assets_at_exactly_90_percent(self) -> None:
         snapshot = {
             "complete": True,
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.0,
+                    "oi_to_market_cap": 0.9,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -615,7 +829,7 @@ class TradeDispatchTests(unittest.TestCase):
             snapshot,
             lambda symbol: _long_setup_candles()
             if symbol == "PEPEUSDT"
-            else _rsi_above_50_candles(),
+            else _rsi_above_60_candles(),
             store,
             notifier,
         )
@@ -633,7 +847,8 @@ class TradeDispatchTests(unittest.TestCase):
                     (
                         "ema200_not_crossed_up",
                         "quote_volume_not_increasing",
-                        "rsi_not_below_50",
+                        "quote_volume_not_above_average",
+                        "rsi_not_below_60",
                     ),
                 ),
             ],
@@ -695,7 +910,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.scans[0].status, "kline_error")
         self.assertIn("1001", result.scans[0].error)
 
-    def test_stops_active_long_at_or_below_100_percent_before_loading_rsi(self) -> None:
+    def test_stops_active_long_at_or_below_90_percent_before_loading_rsi(self) -> None:
         store = MemoryStore()
         store.states["PEPE"] = "long"
         notifier = RecordingNotifier()
@@ -704,25 +919,25 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.0,
+                    "oi_to_market_cap": 0.9,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
         }
 
         result = dispatch_trade_signals(
-            snapshot, lambda _: _rsi_above_50_candles(), store, notifier
+            snapshot, lambda _: _rsi_above_60_candles(), store, notifier
         )
 
         self.assertEqual(result.events, ("stop_long",))
         self.assertEqual(
             result.details[0].reasons,
-            ("oi_to_market_cap_not_above_100",),
+            ("oi_to_market_cap_not_above_90",),
         )
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
         self.assertEqual(store.states["PEPE"].status, "no_add")
 
-    def test_stops_active_long_when_oi_to_market_cap_is_below_100_percent(self) -> None:
+    def test_stops_active_long_when_oi_to_market_cap_is_below_90_percent(self) -> None:
         store = MemoryStore()
         store.states["PEPE"] = "long"
         notifier = RecordingNotifier()
@@ -731,7 +946,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 0.99,
+                    "oi_to_market_cap": 0.89,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -743,7 +958,7 @@ class TradeDispatchTests(unittest.TestCase):
 
         self.assertEqual(result.events, ("stop_long",))
         self.assertEqual(
-            result.details[0].reasons, ("oi_to_market_cap_not_above_100",)
+            result.details[0].reasons, ("oi_to_market_cap_not_above_90",)
         )
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
         self.assertEqual(store.states["PEPE"].status, "no_add")
@@ -757,7 +972,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 0.99,
+                    "oi_to_market_cap": 0.89,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -773,7 +988,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.events, ("stop_long",))
         self.assertEqual(result.failures, ())
         self.assertEqual(
-            result.details[0].reasons, ("oi_to_market_cap_not_above_100",)
+            result.details[0].reasons, ("oi_to_market_cap_not_above_90",)
         )
         self.assertIsNone(result.details[0].candle_close_time)
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
@@ -788,7 +1003,7 @@ class TradeDispatchTests(unittest.TestCase):
             "comparisons": [
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.0,
+                    "oi_to_market_cap": 0.9,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 },
                 {
@@ -800,7 +1015,7 @@ class TradeDispatchTests(unittest.TestCase):
         }
 
         def load(symbol: str):
-            self.assertEqual(notifier.stop_longs, [("PEPE", None, ("oi_to_market_cap_not_above_100",))])
+            self.assertEqual(notifier.stop_longs, [("PEPE", None, ("oi_to_market_cap_not_above_90",))])
             self.assertEqual(store.states["PEPE"].status, "no_add")
             self.assertEqual(symbol, "DOGEUSDT")
             return _candles([100] * 1001)
@@ -810,7 +1025,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.events, ("stop_long",))
         self.assertEqual(result.failures, ())
 
-    def test_stops_active_long_when_rsi_is_exactly_50(self) -> None:
+    def test_stops_active_long_when_rsi_reaches_60(self) -> None:
         store = MemoryStore()
         store.states["PEPE"] = "long"
         notifier = RecordingNotifier()
@@ -824,13 +1039,13 @@ class TradeDispatchTests(unittest.TestCase):
                 }
             ],
         }
-        candles = _candles([100] * 1001)
+        candles = _rsi_above_60_candles()
 
         result = dispatch_trade_signals(snapshot, lambda _: candles, store, notifier)
 
         self.assertEqual(result.events, ("stop_long",))
         self.assertEqual(notifier.signals, [])
-        self.assertIn("rsi_not_below_50", notifier.stop_longs[0][2])
+        self.assertIn("rsi_not_below_60", notifier.stop_longs[0][2])
         self.assertEqual(store.states["PEPE"].status, "no_add")
 
     def test_stops_active_long_when_close_is_below_ema200(self) -> None:

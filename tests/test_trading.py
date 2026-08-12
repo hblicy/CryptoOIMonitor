@@ -8,7 +8,10 @@ from crypto_oi_monitor.trading import (
     entry_reasons,
     evaluate_trade_setup,
     fetch_binance_closed_candles,
+    cooldown_candles_for_volatility_ratio,
     stop_long_reasons,
+    trade_indicators,
+    update_trailing_stop,
 )
 
 
@@ -33,6 +36,28 @@ def _warm_candles(closes: list[float], warmup_close: float = 100) -> list[Candle
 
 
 class TradeSetupTests(unittest.TestCase):
+    def test_raises_trailing_stop_only_after_three_entry_atr_profit(self) -> None:
+        self.assertEqual(
+            update_trailing_stop(100, 2, 96, 100, 105),
+            (105, 96),
+        )
+        self.assertEqual(
+            update_trailing_stop(100, 2, 96, 105, 106),
+            (106, 102),
+        )
+
+    def test_never_lowers_an_existing_trailing_stop(self) -> None:
+        self.assertEqual(
+            update_trailing_stop(100, 2, 103, 106, 105),
+            (106, 103),
+        )
+
+    def test_maps_normalized_atr_ratio_to_dynamic_cooldown(self) -> None:
+        self.assertEqual(cooldown_candles_for_volatility_ratio(0.8), 3)
+        self.assertEqual(cooldown_candles_for_volatility_ratio(0.800001), 4)
+        self.assertEqual(cooldown_candles_for_volatility_ratio(1.2), 4)
+        self.assertEqual(cooldown_candles_for_volatility_ratio(1.200001), 6)
+
     @staticmethod
     def _valid_indicators(**changes) -> TradeIndicators:
         values = {
@@ -43,14 +68,16 @@ class TradeSetupTests(unittest.TestCase):
             "previous_rsi": 39,
             "ema200": 100,
             "previous_ema200": 100,
+            "ema200_slope_reference": 99,
             "atr": 2,
             "quote_volume": 120,
             "previous_quote_volume": 100,
+            "average_quote_volume": 90,
         }
         values.update(changes)
         return TradeIndicators(**values)
 
-    def test_requires_rsi_to_recover_instead_of_only_staying_below_50(self) -> None:
+    def test_requires_rsi_to_recover_instead_of_only_staying_below_60(self) -> None:
         indicators = self._valid_indicators(previous_rsi=42)
 
         self.assertEqual(entry_reasons(indicators), ("rsi_not_rising",))
@@ -61,9 +88,52 @@ class TradeSetupTests(unittest.TestCase):
         self.assertEqual(entry_reasons(indicators), ("ema200_not_crossed_up",))
 
     def test_requires_current_quote_volume_to_exceed_previous_candle(self) -> None:
-        indicators = self._valid_indicators(quote_volume=100)
+        indicators = self._valid_indicators(
+            quote_volume=100,
+            average_quote_volume=50,
+        )
 
         self.assertEqual(entry_reasons(indicators), ("quote_volume_not_increasing",))
+
+    def test_requires_ema200_to_rise_over_five_closed_candles(self) -> None:
+        indicators = self._valid_indicators(ema200_slope_reference=100)
+
+        self.assertEqual(entry_reasons(indicators), ("ema200_not_rising",))
+
+    def test_requires_quote_volume_to_break_twenty_candle_average(self) -> None:
+        indicators = self._valid_indicators(
+            quote_volume=120,
+            previous_quote_volume=100,
+            average_quote_volume=100,
+        )
+
+        self.assertEqual(
+            entry_reasons(indicators),
+            ("quote_volume_not_above_average",),
+        )
+
+    def test_accepts_low_rsi_but_rejects_rsi_at_sixty(self) -> None:
+        self.assertEqual(
+            entry_reasons(self._valid_indicators(rsi=20, previous_rsi=19)),
+            (),
+        )
+        self.assertEqual(
+            entry_reasons(self._valid_indicators(rsi=60)),
+            ("rsi_not_below_60",),
+        )
+
+    def test_exposes_slope_reference_and_average_volume_from_closed_history(
+        self,
+    ) -> None:
+        candles = _candles(
+            [100] * 995 + [99, 100, 100, 100, 100, 101],
+            [50] * 980 + list(range(1, 21)) + [100],
+        )
+
+        indicators = trade_indicators(candles)
+
+        self.assertLess(indicators.ema200_slope_reference, indicators.ema200)
+        self.assertEqual(indicators.average_quote_volume, sum(range(1, 21)) / 20)
 
     def test_stop_long_ignores_one_shot_entry_confirmations(self) -> None:
         indicators = self._valid_indicators(
@@ -121,19 +191,18 @@ class TradeSetupTests(unittest.TestCase):
     def test_emits_long_when_breakout_volume_and_rsi_conditions_are_met(self) -> None:
         closes = (
             [100] * 950
-            + [100 + (index % 2) * 2 for index in range(49)]
-            + [95, 100.5]
+            + [100 + (index % 2) * 2 for index in range(45)]
+            + [97, 98, 102, 102, 100, 100.5]
         )
-        candles = _candles(closes, [100] * 1000 + [120])
+        candles = _candles(closes, [100] * 1000 + [121])
 
         signal = evaluate_trade_setup(candles)
 
         self.assertEqual(signal.side, LONG)
         self.assertEqual(signal.entry_price, 100.5)
         self.assertLess(signal.stop_loss, signal.entry_price)
-        self.assertGreaterEqual(signal.rsi, 35)
         self.assertGreater(signal.rsi, signal.previous_rsi)
-        self.assertLess(signal.rsi, 50)
+        self.assertLess(signal.rsi, 60)
         self.assertGreater(signal.entry_price, signal.ema200)
 
     def test_does_not_emit_short_when_rsi_crosses_down_80_below_ema200(self) -> None:
@@ -146,7 +215,7 @@ class TradeSetupTests(unittest.TestCase):
 
         self.assertIsNone(evaluate_trade_setup(candles))
 
-    def test_does_not_emit_entry_after_rsi_reaches_50(self) -> None:
+    def test_does_not_emit_entry_after_rsi_reaches_60(self) -> None:
         long_candles = _warm_candles(
             [100 + index for index in range(200)]
             + [298 - index for index in range(60)]

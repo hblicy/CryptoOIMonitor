@@ -114,11 +114,80 @@ class SnapshotStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = SnapshotStore(Path(temp_dir) / "monitor.db")
 
-            state = TradeSignalState("long", 100, 98)
+            state = TradeSignalState("long", 100, 96, None, 2, 106, 1234)
             store.set_trade_signal_state("ETH", state)
 
             self.assertEqual(store.get_trade_signal_state("ETH"), state)
             store.clear_trade_signal_state("ETH")
+            self.assertIsNone(store.get_trade_signal_state("ETH"))
+
+    def test_migrates_legacy_active_trade_state_with_trailing_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "monitor.db"
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE trade_signal_states (
+                        canonical_symbol TEXT PRIMARY KEY,
+                        side TEXT NOT NULL,
+                        entry_price REAL,
+                        stop_loss REAL,
+                        cooldown_until_candle_close_time INTEGER
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO trade_signal_states (
+                        canonical_symbol, side, entry_price, stop_loss
+                    ) VALUES ('ETH', 'long', 100, 96)
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertLogs("crypto_oi_monitor.storage", level="INFO"):
+                state = SnapshotStore(database_path).get_trade_signal_state("ETH")
+
+            self.assertEqual(
+                state,
+                TradeSignalState("long", 100, 96, None, 2, 100, None),
+            )
+
+    def test_clears_legacy_active_state_when_entry_atr_cannot_be_derived(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "monitor.db"
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE trade_signal_states (
+                        canonical_symbol TEXT PRIMARY KEY,
+                        side TEXT NOT NULL,
+                        entry_price REAL,
+                        stop_loss REAL,
+                        cooldown_until_candle_close_time INTEGER
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO trade_signal_states (
+                        canonical_symbol, side, entry_price, stop_loss
+                    ) VALUES ('ETH', 'long', 100, 101)
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertLogs("crypto_oi_monitor.storage", level="WARNING"):
+                store = SnapshotStore(database_path)
+
             self.assertIsNone(store.get_trade_signal_state("ETH"))
 
     def test_clears_legacy_long_state_without_exit_parameters(self) -> None:
@@ -175,7 +244,9 @@ class SnapshotStoreTests(unittest.TestCase):
             store = SnapshotStore(Path(temp_dir) / "monitor.db")
             store.set_alert_status("ETH", "high_risk")
             store.set_alert_status("DOGE", "high_risk")
-            store.set_trade_signal_state("ETH", TradeSignalState("long", 100, 98))
+            store.set_trade_signal_state(
+                "ETH", TradeSignalState("long", 100, 98, None, 1, 100, 1234)
+            )
             store.set_trade_signal_state("DOGE", TradeSignalState("short"))
 
             removed_alerts, removed_trade_signals = store.clear_states_outside({"ETH"})
@@ -183,7 +254,8 @@ class SnapshotStoreTests(unittest.TestCase):
             self.assertEqual((removed_alerts, removed_trade_signals), (1, 1))
             self.assertEqual(store.get_alert_status("ETH"), "high_risk")
             self.assertEqual(
-                store.get_trade_signal_state("ETH"), TradeSignalState("long", 100, 98)
+                store.get_trade_signal_state("ETH"),
+                TradeSignalState("long", 100, 98, None, 1, 100, 1234),
             )
             self.assertIsNone(store.get_alert_status("DOGE"))
             self.assertIsNone(store.get_trade_signal_state("DOGE"))

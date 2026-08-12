@@ -70,11 +70,15 @@ class SnapshotStore:
                 ("entry_price", "REAL"),
                 ("stop_loss", "REAL"),
                 ("cooldown_until_candle_close_time", "INTEGER"),
+                ("entry_atr", "REAL"),
+                ("highest_close", "REAL"),
+                ("last_processed_candle_close_time", "INTEGER"),
             ):
                 if column not in columns:
                     connection.execute(
                         f"ALTER TABLE trade_signal_states ADD COLUMN {column} {definition}"
                     )
+            self._migrate_trade_signal_states(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS trade_condition_list_state (
@@ -97,6 +101,51 @@ class SnapshotStore:
                     "ALTER TABLE trade_condition_list_state "
                     "ADD COLUMN exit_long_symbols TEXT NOT NULL DEFAULT '[]'"
                 )
+
+    def _migrate_trade_signal_states(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+                SELECT canonical_symbol, side, entry_price, stop_loss,
+                   entry_atr, highest_close
+            FROM trade_signal_states
+            WHERE side IN ('long', 'no_add')
+            """
+        ).fetchall()
+        for symbol, _side, entry_price, stop_loss, entry_atr, highest_close in rows:
+            if entry_price is None or stop_loss is None:
+                LOGGER.warning(
+                    "清除缺少入场价或保护价的旧交易信号状态：%s", symbol
+                )
+                connection.execute(
+                    "DELETE FROM trade_signal_states WHERE canonical_symbol = ?",
+                    (symbol,),
+                )
+                continue
+            migrated_entry_atr = entry_atr
+            if migrated_entry_atr is None:
+                migrated_entry_atr = (float(entry_price) - float(stop_loss)) / 2
+            if float(migrated_entry_atr) <= 0:
+                LOGGER.warning(
+                    "清除无法反推有效入场 ATR 的旧交易信号状态：%s", symbol
+                )
+                connection.execute(
+                    "DELETE FROM trade_signal_states WHERE canonical_symbol = ?",
+                    (symbol,),
+                )
+                continue
+            migrated_highest_close = (
+                float(entry_price) if highest_close is None else float(highest_close)
+            )
+            if entry_atr is None or highest_close is None:
+                connection.execute(
+                    """
+                    UPDATE trade_signal_states
+                    SET entry_atr = ?, highest_close = ?
+                    WHERE canonical_symbol = ?
+                    """,
+                    (migrated_entry_atr, migrated_highest_close, symbol),
+                )
+                LOGGER.info("迁移旧交易信号状态的移动止盈参数：%s", symbol)
 
     def save_snapshot(self, snapshot: dict[str, Any]) -> None:
         self._protect_disk_space()
@@ -240,7 +289,8 @@ class SnapshotStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT side, entry_price, stop_loss, cooldown_until_candle_close_time
+                SELECT side, entry_price, stop_loss, cooldown_until_candle_close_time,
+                       entry_atr, highest_close, last_processed_candle_close_time
                 FROM trade_signal_states
                 WHERE canonical_symbol = ?
                 """,
@@ -253,12 +303,20 @@ class SnapshotStore:
                 entry_price=None if row[1] is None else float(row[1]),
                 stop_loss=None if row[2] is None else float(row[2]),
                 cooldown_until_candle_close_time=None if row[3] is None else int(row[3]),
+                entry_atr=None if row[4] is None else float(row[4]),
+                highest_close=None if row[5] is None else float(row[5]),
+                last_processed_candle_close_time=(
+                    None if row[6] is None else int(row[6])
+                ),
             )
             if state.status in {"long", "no_add"} and (
-                state.entry_price is None or state.stop_loss is None
+                state.entry_price is None
+                or state.stop_loss is None
+                or state.entry_atr is None
+                or state.highest_close is None
             ):
                 LOGGER.warning(
-                    "清除缺少入场价或止损价的旧交易信号状态：%s", canonical_symbol
+                    "清除缺少移动止盈参数的交易信号状态：%s", canonical_symbol
                 )
                 connection.execute(
                     "DELETE FROM trade_signal_states WHERE canonical_symbol = ?",
@@ -278,13 +336,19 @@ class SnapshotStore:
                     side,
                     entry_price,
                     stop_loss,
-                    cooldown_until_candle_close_time
-                ) VALUES (?, ?, ?, ?, ?)
+                    cooldown_until_candle_close_time,
+                    entry_atr,
+                    highest_close,
+                    last_processed_candle_close_time
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(canonical_symbol) DO UPDATE SET
                     side = excluded.side,
                     entry_price = excluded.entry_price,
                     stop_loss = excluded.stop_loss,
-                    cooldown_until_candle_close_time = excluded.cooldown_until_candle_close_time
+                    cooldown_until_candle_close_time = excluded.cooldown_until_candle_close_time,
+                    entry_atr = excluded.entry_atr,
+                    highest_close = excluded.highest_close,
+                    last_processed_candle_close_time = excluded.last_processed_candle_close_time
                 """,
                 (
                     canonical_symbol,
@@ -292,6 +356,9 @@ class SnapshotStore:
                     state.entry_price,
                     state.stop_loss,
                     state.cooldown_until_candle_close_time,
+                    state.entry_atr,
+                    state.highest_close,
+                    state.last_processed_candle_close_time,
                 ),
             )
 

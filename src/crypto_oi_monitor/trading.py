@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from statistics import median
 from typing import Any, Protocol
 
 
@@ -10,9 +11,15 @@ EMA_PERIOD = 200
 EMA_WARMUP_CANDLES = 1000
 REQUIRED_CLOSED_CANDLES = EMA_WARMUP_CANDLES + 1
 FIFTEEN_MINUTES_MILLISECONDS = 15 * 60 * 1000
-ENTRY_RSI_MIN = 35
-ENTRY_RSI_MAX = 50
+EMA_SLOPE_LOOKBACK = 5
+VOLUME_AVERAGE_PERIOD = 20
+VOLUME_BREAKOUT_MULTIPLIER = 1.2
+ENTRY_RSI_MAX = 60
 EXIT_EMA_ATR_BUFFER = 0.5
+TRAILING_ACTIVATION_ATR = 3
+TRAILING_PROFIT_FLOOR_ATR = 1
+TRAILING_DISTANCE_ATR = 2
+COOLDOWN_BASELINE_CANDLES = 96
 LONG = "long"
 BINANCE_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
 
@@ -41,9 +48,11 @@ class TradeSetup:
     previous_close: float
     ema200: float
     previous_ema200: float
+    ema200_slope_reference: float
     atr: float
     quote_volume: float
     previous_quote_volume: float
+    average_quote_volume: float
 
 
 @dataclass(frozen=True)
@@ -55,9 +64,11 @@ class TradeIndicators:
     previous_rsi: float
     ema200: float
     previous_ema200: float
+    ema200_slope_reference: float
     atr: float
     quote_volume: float
     previous_quote_volume: float
+    average_quote_volume: float
 
 
 def fetch_binance_closed_candles(
@@ -104,9 +115,11 @@ def evaluate_trade_setup(candles: list[Candle]) -> TradeSetup | None:
         indicators.previous_close,
         indicators.ema200,
         indicators.previous_ema200,
+        indicators.ema200_slope_reference,
         indicators.atr,
         indicators.quote_volume,
         indicators.previous_quote_volume,
+        indicators.average_quote_volume,
     )
 
 
@@ -117,7 +130,9 @@ def trade_indicators(candles: list[Candle]) -> TradeIndicators:
         )
     closes = [candle.close for candle in candles]
     previous_rsi, rsi = _rsi_values(closes, RSI_PERIOD)[-2:]
-    previous_ema200, ema200 = _ema_values(closes, EMA_PERIOD)[-2:]
+    ema200_values = _ema_values(closes, EMA_PERIOD)
+    previous_ema200, ema200 = ema200_values[-2:]
+    ema200_slope_reference = ema200_values[-(EMA_SLOPE_LOOKBACK + 1)]
     atr = _atr(candles, ATR_PERIOD)
     previous = candles[-2]
     current = candles[-1]
@@ -129,9 +144,12 @@ def trade_indicators(candles: list[Candle]) -> TradeIndicators:
         previous_rsi,
         ema200,
         previous_ema200,
+        ema200_slope_reference,
         atr,
         current.quote_volume,
         previous.quote_volume,
+        sum(candle.quote_volume for candle in candles[-(VOLUME_AVERAGE_PERIOD + 1) : -1])
+        / VOLUME_AVERAGE_PERIOD,
     )
 
 
@@ -142,12 +160,17 @@ def entry_reasons(indicators: TradeIndicators) -> tuple[str, ...]:
         and indicators.close > indicators.ema200
     ):
         reasons.append("ema200_not_crossed_up")
+    if indicators.ema200 <= indicators.ema200_slope_reference:
+        reasons.append("ema200_not_rising")
     if indicators.quote_volume <= indicators.previous_quote_volume:
         reasons.append("quote_volume_not_increasing")
-    if indicators.rsi < ENTRY_RSI_MIN:
-        reasons.append("rsi_below_35")
+    if (
+        indicators.quote_volume
+        <= VOLUME_BREAKOUT_MULTIPLIER * indicators.average_quote_volume
+    ):
+        reasons.append("quote_volume_not_above_average")
     if indicators.rsi >= ENTRY_RSI_MAX:
-        reasons.append("rsi_not_below_50")
+        reasons.append("rsi_not_below_60")
     if indicators.rsi <= indicators.previous_rsi:
         reasons.append("rsi_not_rising")
     return tuple(reasons)
@@ -156,18 +179,72 @@ def entry_reasons(indicators: TradeIndicators) -> tuple[str, ...]:
 def stop_long_reasons(indicators: TradeIndicators) -> tuple[str, ...]:
     reasons = []
     if indicators.rsi >= ENTRY_RSI_MAX:
-        reasons.append("rsi_not_below_50")
+        reasons.append("rsi_not_below_60")
     if indicators.close <= indicators.ema200:
         reasons.append("close_not_above_ema200")
     return tuple(reasons)
 
 
+def update_trailing_stop(
+    entry_price: float,
+    entry_atr: float,
+    stop_loss: float,
+    highest_close: float,
+    close: float,
+) -> tuple[float, float]:
+    if entry_atr <= 0:
+        raise ValueError("Entry ATR must be positive")
+    next_highest_close = max(highest_close, close)
+    if next_highest_close < entry_price + TRAILING_ACTIVATION_ATR * entry_atr:
+        return next_highest_close, stop_loss
+    return next_highest_close, max(
+        stop_loss,
+        entry_price + TRAILING_PROFIT_FLOOR_ATR * entry_atr,
+        next_highest_close - TRAILING_DISTANCE_ATR * entry_atr,
+    )
+
+
+def cooldown_candles_for_volatility_ratio(volatility_ratio: float) -> int:
+    if volatility_ratio <= 0:
+        raise ValueError("Volatility ratio must be positive")
+    if volatility_ratio <= 0.8:
+        return 3
+    if volatility_ratio <= 1.2:
+        return 4
+    return 6
+
+
+def dynamic_cooldown_candles(candles: list[Candle]) -> int:
+    atr_values = _atr_values(candles, ATR_PERIOD)
+    normalized_atr_values = [
+        atr / candle.close
+        for atr, candle in zip(atr_values, candles[ATR_PERIOD:])
+    ]
+    if len(normalized_atr_values) < COOLDOWN_BASELINE_CANDLES + 1:
+        raise ValueError("Dynamic cooldown requires 96 prior normalized ATR values")
+    baseline = median(
+        normalized_atr_values[-(COOLDOWN_BASELINE_CANDLES + 1) : -1]
+    )
+    if baseline <= 0:
+        raise ValueError("Dynamic cooldown ATR baseline must be positive")
+    return cooldown_candles_for_volatility_ratio(
+        normalized_atr_values[-1] / baseline
+    )
+
+
 def exit_reasons(
-    candles: list[Candle], indicators: TradeIndicators, stop_loss: float | None
+    candles: list[Candle],
+    indicators: TradeIndicators,
+    stop_loss: float | None,
+    entry_price: float | None = None,
 ) -> tuple[str, ...]:
     reasons = []
     if stop_loss is not None and indicators.close <= stop_loss:
-        reasons.append("atr_stop_loss")
+        reasons.append(
+            "trailing_take_profit"
+            if entry_price is not None and stop_loss > entry_price
+            else "atr_stop_loss"
+        )
     if indicators.close <= indicators.ema200 - EXIT_EMA_ATR_BUFFER * indicators.atr:
         reasons.append("close_below_ema200_exit_buffer")
     if (
@@ -223,6 +300,10 @@ def _rsi(average_gain: float, average_loss: float) -> float:
 
 
 def _atr(candles: list[Candle], period: int) -> float:
+    return _atr_values(candles, period)[-1]
+
+
+def _atr_values(candles: list[Candle], period: int) -> list[float]:
     ranges = [
         max(
             current.high - current.low,
@@ -234,6 +315,8 @@ def _atr(candles: list[Candle], period: int) -> float:
     if len(ranges) < period:
         raise ValueError("Trade signals require ATR history")
     average = sum(ranges[:period]) / period
+    values = [average]
     for value in ranges[period:]:
         average = (average * (period - 1) + value) / period
-    return average
+        values.append(average)
+    return values

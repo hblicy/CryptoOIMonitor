@@ -24,9 +24,11 @@ def _indicators(rsi: float = 45, close: float = 101, ema200: float = 100) -> Tra
         previous_rsi=rsi - 1,
         ema200=ema200,
         previous_ema200=ema200 - 0.1,
+        ema200_slope_reference=ema200 - 0.2,
         atr=3,
         quote_volume=120,
         previous_quote_volume=100,
+        average_quote_volume=90,
     )
 
 
@@ -129,9 +131,11 @@ class WeComNotifierTests(unittest.TestCase):
                 previous_close=228,
                 ema200=229,
                 previous_ema200=228.5,
+                ema200_slope_reference=228,
                 atr=3,
                 quote_volume=1_200_000,
                 previous_quote_volume=1_000_000,
+                average_quote_volume=900_000,
             ),
             {
                 "canonical_symbol": "PEPE",
@@ -151,9 +155,13 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertIn("参考入场：246.00000000", content)
         self.assertIn("止损：240.00000000", content)
         self.assertIn("做多条件", content)
-        self.assertIn("OI / 市值 > 100%", content)
+        self.assertIn("OI / 市值 > 90%", content)
+        self.assertIn("5根前 EMA200：228.00000000", content)
+        self.assertIn("前20根15m平均成交额：900,000.00 USD", content)
         self.assertIn("15分钟前聚合 OI：110.00 USD", content)
         self.assertIn("当前聚合 OI：120.00 USD", content)
+        self.assertIn("15分钟前价格校正 OI 指数：0.48245614", content)
+        self.assertIn("当前价格校正 OI 指数：0.48780488", content)
         self.assertIn("上一根收盘价：228.00000000", content)
         self.assertIn("当前收盘价：246.00000000", content)
         self.assertIn("上一根15m成交额：1,000,000.00 USD", content)
@@ -166,14 +174,50 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertNotIn("<font", content)
         self.assertNotIn("**", content)
 
-    def test_sends_stop_long_message_after_rsi_exceeds_50(self) -> None:
+    def test_sends_resume_long_message_with_no_averaging_warning(self) -> None:
+        client = RecordingClient()
+        notifier = WeComNotifier("https://wecom.example/webhook", client)
+
+        signal = TradeSetup(
+            side=LONG,
+            candle_close_time=1_000,
+            entry_price=246,
+            stop_loss=240,
+            rsi=55,
+            previous_rsi=50,
+            previous_close=228,
+            ema200=229,
+            previous_ema200=228.5,
+            ema200_slope_reference=228,
+            atr=3,
+            quote_volume=1_200_000,
+            previous_quote_volume=1_000_000,
+            average_quote_volume=900_000,
+        )
+        notifier.send_trade_signal(
+            signal,
+            {
+                "canonical_symbol": "PEPE",
+                "oi_to_market_cap": 1.2,
+                "total_oi_usd": 120,
+            },
+            110,
+            "resume_long",
+        )
+
+        content = client.sent[0][1]["text"]["content"]
+        self.assertIn("交易信号：恢复做多", content)
+        self.assertIn("仅适用于已经平仓后的重新开仓", content)
+        self.assertIn("不作为亏损仓位补仓依据", content)
+
+    def test_sends_stop_long_message_after_rsi_reaches_60(self) -> None:
         client = RecordingClient()
         notifier = WeComNotifier("https://wecom.example/webhook", client)
 
         notifier.send_stop_long(
             {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.2},
-            _indicators(52.5, 101, 100),
-            ("rsi_not_below_50",),
+            _indicators(62.5, 101, 100),
+            ("rsi_not_below_60",),
         )
 
         payload = client.sent[0][1]
@@ -181,7 +225,7 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertEqual(payload["msgtype"], "text")
         self.assertIn("交易信号：停止开多", content)
         self.assertIn("PEPE", content)
-        self.assertIn("RSI(14)：52.50", content)
+        self.assertIn("RSI(14)：62.50", content)
         self.assertIn("请勿继续开多", content)
         self.assertIn("OI / 市值：120.00%", content)
         self.assertNotIn("<font", content)
@@ -202,37 +246,37 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertIn("EMA200：100.00000000", content)
         self.assertIn("15m 收盘价未高于 EMA200", content)
 
-    def test_sends_stop_long_message_when_oi_to_market_cap_is_not_above_100(
+    def test_sends_stop_long_message_when_oi_to_market_cap_is_not_above_90(
         self,
     ) -> None:
         client = RecordingClient()
         notifier = WeComNotifier("https://wecom.example/webhook", client)
 
         notifier.send_stop_long(
-            {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.0},
+            {"canonical_symbol": "PEPE", "oi_to_market_cap": 0.9},
             None,
-            ("oi_to_market_cap_not_above_100",),
+            ("oi_to_market_cap_not_above_90",),
         )
 
         content = client.sent[0][1]["text"]["content"]
-        self.assertIn("OI / 市值未高于 100%", content)
-        self.assertIn("OI / 市值：100.00%", content)
+        self.assertIn("OI / 市值未高于 90%", content)
+        self.assertIn("OI / 市值：90.00%", content)
 
     def test_sends_oi_threshold_stop_message_without_kline_metrics(self) -> None:
         client = RecordingClient()
         notifier = WeComNotifier("https://wecom.example/webhook", client)
 
         notifier.send_stop_long(
-            {"canonical_symbol": "PEPE", "oi_to_market_cap": 0.99},
+            {"canonical_symbol": "PEPE", "oi_to_market_cap": 0.89},
             None,
-            ("oi_to_market_cap_not_above_100",),
+            ("oi_to_market_cap_not_above_90",),
         )
 
         content = client.sent[0][1]["text"]["content"]
         self.assertIn("本轮未获取", content)
         self.assertIn("周期：不适用（按 OI / 市值触发）", content)
         self.assertNotIn("周期：15m（已收盘）", content)
-        self.assertIn("OI / 市值：99.00%", content)
+        self.assertIn("OI / 市值：89.00%", content)
 
     def test_sends_must_exit_message_with_stop_and_cooldown(self) -> None:
         client = RecordingClient()
@@ -241,15 +285,16 @@ class WeComNotifierTests(unittest.TestCase):
         notifier.send_exit_long(
             {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.2},
             _indicators(40, 97, 100),
-            TradeSignalState("long", 100, 98),
+            TradeSignalState("long", 100, 98, None, 1, 100),
             ("atr_stop_loss",),
+            6,
         )
 
         content = client.sent[0][1]["text"]["content"]
         self.assertIn("交易信号：必须退出", content)
         self.assertIn("止损：98.00000000", content)
         self.assertIn("请执行退出，不要补仓", content)
-        self.assertIn("至少等待 4 根 15m K 线", content)
+        self.assertIn("等待 6 根 15m K 线", content)
 
     def test_rejects_short_trade_signals(self) -> None:
         notifier = WeComNotifier("https://wecom.example/webhook", RecordingClient())
@@ -266,9 +311,11 @@ class WeComNotifierTests(unittest.TestCase):
                     previous_close=251,
                     ema200=250,
                     previous_ema200=250,
+                    ema200_slope_reference=249,
                     atr=3,
                     quote_volume=1_200_000,
                     previous_quote_volume=1_000_000,
+                    average_quote_volume=900_000,
                 ),
                 {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.2},
                 110,

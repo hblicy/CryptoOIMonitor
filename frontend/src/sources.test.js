@@ -36,13 +36,16 @@ describe("data source groups", () => {
 
   it("labels long and stop-long signal details for the dashboard", () => {
     expect(tradeSignalLabel("long")).toBe("开多");
+    expect(tradeSignalLabel("resume_long")).toBe("恢复做多");
     expect(tradeSignalLabel("stop_long")).toBe("停止开多");
-    expect(tradeSignalReason("oi_to_market_cap_not_above_100")).toBe("OI / 市值未高于 100%");
+    expect(tradeSignalReason("oi_to_market_cap_not_above_90")).toBe("OI / 市值未高于 90%");
     expect(tradeSignalReason("aggregate_oi_history_unavailable")).toBe("缺少15分钟前聚合 OI");
-    expect(tradeSignalReason("aggregate_oi_not_increasing")).toBe("聚合 OI 未较15分钟前增加");
+    expect(tradeSignalReason("aggregate_oi_not_increasing_after_price_adjustment")).toBe("价格校正后的聚合 OI 未较15分钟前增加");
     expect(tradeSignalReason("ema200_not_crossed_up")).toBe("15m 收盘价未首次上穿 EMA200");
+    expect(tradeSignalReason("ema200_not_rising")).toBe("EMA200 未向上倾斜");
     expect(tradeSignalReason("quote_volume_not_increasing")).toBe("15m USDT 成交额未较上一根增加");
-    expect(tradeSignalReason("rsi_above_50")).toBe("RSI(14) 超过 50");
+    expect(tradeSignalReason("quote_volume_not_above_average")).toBe("15m 成交额未突破前20根均量的1.2倍");
+    expect(tradeSignalReason("rsi_not_below_60")).toBe("RSI(14) 未低于 60");
     expect(tradeSignalReason("close_below_ema200")).toBe("15m 收盘价低于 EMA200");
   });
 
@@ -79,11 +82,11 @@ describe("data source groups", () => {
       tradeConditionReasons([
         "close_below_ema200_exit_buffer",
         "two_closes_below_ema200",
-        "rsi_not_below_50",
+        "rsi_not_below_60",
         "rsi_not_rising",
       ]),
     ).toBe(
-      "15m 收盘价低于 EMA200 − 0.5 × ATR；连续两根 15m 收盘价低于 EMA200；RSI(14) 未低于 50；RSI(14) 未回升",
+      "15m 收盘价低于 EMA200 − 0.5 × ATR；连续两根 15m 收盘价低于 EMA200；RSI(14) 未低于 60；RSI(14) 未回升",
     );
   });
 });

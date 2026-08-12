@@ -139,7 +139,7 @@ class AppRefreshTests(unittest.TestCase):
             {
                 "complete": True,
                 "comparisons": [
-                    {"canonical_symbol": "PEPE", "oi_to_market_cap": 1.0}
+                    {"canonical_symbol": "PEPE", "oi_to_market_cap": 0.8}
                 ],
                 "unmapped_assets": ["AAA"],
             }
