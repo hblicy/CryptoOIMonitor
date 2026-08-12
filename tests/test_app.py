@@ -21,6 +21,7 @@ from app import (
 from crypto_oi_monitor.trade_dispatch import (
     EXIT_LONG,
     NO_ADD,
+    REENTRY_COOLDOWN,
     TradeConditionScan,
     TradeConditionScanResult,
     TradeSignalEvent,
@@ -218,7 +219,7 @@ class AppRefreshTests(unittest.TestCase):
         application.store.trade_states = {
             "PEPE": TradeSignalState(status=LONG),
             "DOGE": TradeSignalState(status=NO_ADD),
-            "OLD": TradeSignalState(status="reentry_cooldown"),
+            "OLD": TradeSignalState(status=REENTRY_COOLDOWN),
         }
         application.notifier = None
         application.trade_kline_loader = object()
@@ -226,7 +227,7 @@ class AppRefreshTests(unittest.TestCase):
 
         application.refresh()
 
-        self.assertEqual(application.store.active_assets, {"PEPE", "DOGE"})
+        self.assertEqual(application.store.active_assets, {"PEPE", "DOGE", "OLD"})
 
     def test_records_trade_signal_failures_without_breaking_snapshot_json(self) -> None:
         application = MonitorApplication.__new__(MonitorApplication)
@@ -346,6 +347,22 @@ class AppRefreshTests(unittest.TestCase):
 
 
 class ManualRefreshTests(unittest.TestCase):
+    def test_manual_refresh_requires_the_configured_token(self) -> None:
+        application = MonitorApplication.__new__(MonitorApplication)
+        application._manual_refresh_token = "test-refresh-token"
+
+        self.assertFalse(application.manual_refresh_is_authorized(None))
+        self.assertFalse(application.manual_refresh_is_authorized("wrong-token"))
+        self.assertTrue(
+            application.manual_refresh_is_authorized("test-refresh-token")
+        )
+
+    def test_manual_refresh_is_disabled_without_a_configured_token(self) -> None:
+        application = MonitorApplication.__new__(MonitorApplication)
+        application._manual_refresh_token = None
+
+        self.assertFalse(application.manual_refresh_is_authorized("any-token"))
+
     def test_limits_successive_manual_refreshes_from_the_last_manual_completion(self) -> None:
         application = MonitorApplication.__new__(MonitorApplication)
         application._lock = threading.RLock()
@@ -422,25 +439,25 @@ class RefreshScheduleTests(unittest.TestCase):
         self.assertEqual(next_deadline, 120)
         self.assertEqual(wait_seconds, 30)
 
-    def test_starts_once_immediately_when_refresh_exceeds_its_interval(self) -> None:
+    def test_waits_a_full_interval_after_a_refresh_exceeds_its_interval(self) -> None:
         next_deadline, wait_seconds = next_refresh_schedule(
             previous_deadline=120,
             finished_at=250,
             interval_seconds=120,
         )
 
-        self.assertEqual(next_deadline, 250)
-        self.assertEqual(wait_seconds, 0)
+        self.assertEqual(next_deadline, 370)
+        self.assertEqual(wait_seconds, 120)
 
-    def test_resumes_the_interval_after_the_immediate_catch_up_refresh(self) -> None:
+    def test_repeated_overruns_never_create_a_zero_wait_loop(self) -> None:
         next_deadline, wait_seconds = next_refresh_schedule(
-            previous_deadline=250,
-            finished_at=260,
+            previous_deadline=370,
+            finished_at=500,
             interval_seconds=120,
         )
 
-        self.assertEqual(next_deadline, 370)
-        self.assertEqual(wait_seconds, 110)
+        self.assertEqual(next_deadline, 620)
+        self.assertEqual(wait_seconds, 120)
 
 
 class RefreshIntervalValidationTests(unittest.TestCase):

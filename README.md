@@ -19,13 +19,14 @@ npm run build
 cd ..
 $env:COINMARKETCAP_API_KEY = "你的 CoinMarketCap Pro API Key" # 必填
 $env:WECOM_ROBOT_WEBHOOK_URL = "你的企业微信机器人 Webhook" # 启用提醒时必填
+$env:MANUAL_REFRESH_TOKEN = "单独生成的手动刷新令牌" # 启用网页手动刷新时必填
 python app.py --port 8766
 ```
 
 打开 <http://127.0.0.1:8766>。
 
-页面服务启动后立即刷新，之后按固定 120 秒时间点刷新；若单轮耗时超过 120 秒，会在结束后立即补跑一轮，但不会并发重叠，随后从该轮完成时间重新计算 120 秒周期。Binance、BingX 和 Aster 需按交易对拉取 OI，首轮全量刷新通常需要约一分钟；BingX 单个请求超过 12 秒会将该数据源标记为异常并暂停提醒推送。页面会保留最近一次完整快照并显示其时间。
-`COINMARKETCAP_API_KEY` 必须存在且不能是空字符串。`REFRESH_SECONDS`、`CMC_REFRESH_SECONDS`、`SNAPSHOT_RETENTION_DAYS`、`MIN_FREE_DISK_GB`、`LOG_MAX_MB` 和 `LOG_BACKUP_COUNT` 必须是大于 0 的整数；配置为 `0` 或负数时服务会拒绝启动。OI 按 `REFRESH_SECONDS`（默认 120 秒）刷新；CoinMarketCap 市值按 `CMC_REFRESH_SECONDS`（默认 600 秒）独立刷新。网页手动刷新采用非阻塞锁，同一时间只允许一轮刷新，且两次成功的手动刷新至少间隔 `REFRESH_SECONDS`；过于频繁时接口返回 HTTP 429。
+页面服务启动后立即刷新，正常情况下按固定 120 秒时间点刷新；若单轮耗时达到或超过 120 秒，下一轮会从本轮完成后再等待完整的 120 秒，避免持续零等待刷新放大交易所和 CoinMarketCap 压力。Binance、BingX 和 Aster 需按交易对拉取 OI，首轮全量刷新通常需要约一分钟；BingX 单个请求超过 12 秒会将该数据源标记为异常并暂停提醒推送。页面会保留最近一次完整快照并显示其时间。
+`COINMARKETCAP_API_KEY` 必须存在且不能是空字符串。`REFRESH_SECONDS`、`CMC_REFRESH_SECONDS`、`SNAPSHOT_RETENTION_DAYS`、`MIN_FREE_DISK_GB`、`LOG_MAX_MB` 和 `LOG_BACKUP_COUNT` 必须是大于 0 的整数；配置为 `0` 或负数时服务会拒绝启动。OI 按 `REFRESH_SECONDS`（默认 120 秒）刷新；CoinMarketCap 市值按 `CMC_REFRESH_SECONDS`（默认 600 秒）独立刷新。网页手动刷新要求请求头携带独立的 `MANUAL_REFRESH_TOKEN`；未配置时接口保持禁用，首次点击“刷新数据”会要求输入令牌并仅保存到当前浏览器会话。手动刷新采用非阻塞锁，同一时间只允许一轮刷新，且两次成功的手动刷新至少间隔 `REFRESH_SECONDS`；未授权时返回 HTTP 403，过于频繁时返回 HTTP 429。
 
 同一进程会缓存已确认的 CoinMarketCap 币种 ID，后续市值刷新只请求报价，不会重复请求映射接口；币种池在缓存有效期内变化时不会提前调用 CMC，新币先标记为未映射并在下一次定时刷新处理。未映射或符号歧义的币种每小时会重新尝试映射一次。实际请求市值时会在日志中记录。
 
@@ -37,7 +38,7 @@ CoinMarketCap 健康状态会显示市值的实际更新时间；顶部时间仅
 # 首次部署
 # 前端构建需使用受支持的偶数版 Node.js，Ubuntu 建议 Node.js 20 LTS。
 cp .env.example .env
-nano .env                    # 填写 API Key 和 Webhook
+nano .env                    # 填写 API Key、Webhook 和 MANUAL_REFRESH_TOKEN
 
 cd frontend
 npm ci && npm run build
@@ -82,9 +83,10 @@ ENV_FILE=/etc/crypto-oi-monitor.env bash scripts/start.sh
 - 风险规则：亏损状态不补仓；本系统只提供信号，不会执行实际下单、仓位管理或止损单。
 - 杠杆参考：2-3 倍；信号不包含自动下单或仓位金额。
 - 同一币种在做多或恢复做多后不会重复推送同类信号；停止后必须出现新的完整突破，才能再次推送恢复做多。
+- 每条企业微信交易信号使用持久化事件 ID 记录发送回执；若通知成功后交易状态写入中断，下轮会先恢复待应用状态，再继续扫描，避免同一状态变化重复推送或丢失风控状态。
 - Web 页面“交易条件扫描”会列出所有 `OI / 市值 > 90%` 的标的，分为可以做多、停止做多、必须退出和 K 线异常，并展示 RSI、收盘价、EMA200、OI / 市值、价格校正 OI、EMA200 斜率及 15m 成交额突破情况。主表的重点关注门槛仍为 `> 110%`，埋伏候选区仍为 `> 200%`。
 - 当“可以做多”、“停止做多”或“必须退出”相对上一次已成功推送的列表有新增币种时，企业微信立即推送当前三类完整列表；没有新增时，每 1 小时推送一次当前列表。临时离开列表后又回归的币种不会重复推送。列表只显示币种；K 线扫描存在失败时，不推送不完整列表。
-- 完整快照中既不在比较结果、也不在 CoinMarketCap 未映射清单、且没有做多或停止做多状态的币种会清除交易信号状态；已有仓位风控状态即使暂时跌出 Binance 成交额币种池也会保留，并继续使用持久化的 Binance 合约交易对执行 15m 风控。
+- 完整快照中既不在比较结果、也不在 CoinMarketCap 未映射清单、且没有做多、停止做多或必须退出冷却状态的币种会清除交易信号状态；已有仓位风控和冷却状态即使暂时跌出 Binance 成交额币种池也会保留，并继续使用持久化的 Binance 合约交易对执行 15m 风控。
 
 机器人 Webhook 仅从 `WECOM_ROBOT_WEBHOOK_URL` 环境变量读取，绝不写入代码或提交到仓库。
 

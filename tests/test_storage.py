@@ -126,7 +126,15 @@ class SnapshotStoreTests(unittest.TestCase):
             store = SnapshotStore(Path(temp_dir) / "monitor.db")
 
             state = TradeSignalState(
-                "long", 100, 96, None, 2, 106, 1234, "ETHUSDT"
+                "long",
+                100,
+                96,
+                None,
+                2,
+                106,
+                1234,
+                "ETHUSDT",
+                "ETH:123",
             )
             store.set_trade_signal_state("ETH", state)
 
@@ -134,6 +142,66 @@ class SnapshotStoreTests(unittest.TestCase):
             self.assertEqual(store.list_trade_signal_states(), {"ETH": state})
             store.clear_trade_signal_state("ETH")
             self.assertIsNone(store.get_trade_signal_state("ETH"))
+
+    def test_persists_notification_delivery_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.db"
+            store = SnapshotStore(database_path)
+
+            self.assertFalse(store.notification_was_delivered("trade:exit:ETH:123"))
+            store.mark_notification_delivered("trade:exit:ETH:123")
+
+            reopened = SnapshotStore(database_path)
+            self.assertTrue(
+                reopened.notification_was_delivered("trade:exit:ETH:123")
+            )
+
+    def test_recovers_pending_trade_state_after_a_delivered_notification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.db"
+            store = SnapshotStore(database_path)
+            target = TradeSignalState(
+                status="reentry_cooldown",
+                cooldown_until_candle_close_time=456,
+                binance_symbol="ETHUSDT",
+                position_id="ETH:123",
+            )
+
+            store.mark_trade_notification_delivered(
+                "trade:exit:ETH:123", "ETH", target
+            )
+            reopened = SnapshotStore(database_path)
+
+            self.assertEqual(reopened.get_trade_signal_state("ETH"), target)
+
+    def test_does_not_reapply_a_finalized_trade_state_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "monitor.db"
+            store = SnapshotStore(database_path)
+            delivered = TradeSignalState(
+                status="reentry_cooldown",
+                cooldown_until_candle_close_time=456,
+                binance_symbol="ETHUSDT",
+                position_id="ETH:123",
+            )
+            newer = TradeSignalState(
+                status="long",
+                entry_price=100,
+                stop_loss=98,
+                entry_atr=1,
+                highest_close=100,
+                binance_symbol="ETHUSDT",
+                position_id="ETH:789",
+            )
+
+            event_id = "trade:exit_long:ETH:ETH:123"
+            store.mark_trade_notification_delivered(event_id, "ETH", delivered)
+            store.set_trade_signal_state("ETH", delivered)
+            store.mark_trade_notification_state_applied(event_id)
+            store.set_trade_signal_state("ETH", newer)
+
+            reopened = SnapshotStore(database_path)
+            self.assertEqual(reopened.get_trade_signal_state("ETH"), newer)
 
     def test_migrates_legacy_active_trade_state_with_trailing_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

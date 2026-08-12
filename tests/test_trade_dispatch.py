@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from crypto_oi_monitor.http_client import DataSourceRequestError
 from crypto_oi_monitor.trade_dispatch import (
+    CAN_LONG,
     EXIT_LONG,
     NO_ADD,
     RESUME_LONG,
@@ -168,6 +169,8 @@ def scan_trade_conditions(snapshot, kline_loader):
 class MemoryStore:
     def __init__(self) -> None:
         self.states: dict[str, TradeSignalState | str] = {}
+        self.delivered_notifications: set[str] = set()
+        self.pending_trade_states: dict[str, TradeSignalState] = {}
 
     def get_trade_signal_state(self, symbol: str) -> TradeSignalState | str | None:
         return self.states.get(symbol)
@@ -180,6 +183,26 @@ class MemoryStore:
 
     def clear_trade_signal_state(self, symbol: str) -> None:
         self.states.pop(symbol, None)
+
+    def notification_was_delivered(self, event_id: str) -> bool:
+        return event_id in self.delivered_notifications
+
+    def mark_notification_delivered(self, event_id: str) -> None:
+        self.delivered_notifications.add(event_id)
+
+    def mark_trade_notification_delivered(
+        self, event_id: str, symbol: str, state: TradeSignalState
+    ) -> None:
+        self.delivered_notifications.add(event_id)
+        self.pending_trade_states[symbol] = state
+
+    def mark_trade_notification_state_applied(self, event_id: str) -> None:
+        symbol = event_id.split(":", 3)[2]
+        self.pending_trade_states.pop(symbol, None)
+
+    def apply_pending_trade_signal_states(self) -> None:
+        self.states.update(self.pending_trade_states)
+        self.pending_trade_states.clear()
 
 
 class RecordingNotifier:
@@ -225,15 +248,57 @@ class FailingExitNotifier(RecordingNotifier):
         raise RuntimeError("WeCom exit failed")
 
 
+class FailingFirstExitNotifier(RecordingNotifier):
+    def send_exit_long(
+        self, comparison, indicators, state, reasons, cooldown_candles
+    ) -> None:
+        if comparison["canonical_symbol"] == "PEPE":
+            raise RuntimeError("WeCom exit failed")
+        super().send_exit_long(
+            comparison, indicators, state, reasons, cooldown_candles
+        )
+
+
+class FailFirstTradeStateWriteStore(MemoryStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next_state_write = True
+
+    def set_trade_signal_state(self, symbol: str, state: TradeSignalState) -> None:
+        if self.fail_next_state_write:
+            self.fail_next_state_write = False
+            raise RuntimeError("state write failed")
+        super().set_trade_signal_state(symbol, state)
+
+
 class ConditionListStore:
     def __init__(self, state) -> None:
         self.state = state
+        self.delivered_notifications: set[str] = set()
 
     def get_trade_condition_list_state(self):
         return self.state
 
     def set_trade_condition_list_state(self, state) -> None:
         self.state = state
+
+    def notification_was_delivered(self, event_id: str) -> bool:
+        return event_id in self.delivered_notifications
+
+    def mark_notification_delivered(self, event_id: str) -> None:
+        self.delivered_notifications.add(event_id)
+
+
+class FailFirstConditionListStateWriteStore(ConditionListStore):
+    def __init__(self, state) -> None:
+        super().__init__(state)
+        self.fail_next_state_write = True
+
+    def set_trade_condition_list_state(self, state) -> None:
+        if self.fail_next_state_write:
+            self.fail_next_state_write = False
+            raise RuntimeError("list state write failed")
+        super().set_trade_condition_list_state(state)
 
 
 class ConditionListNotifier:
@@ -380,6 +445,35 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.scans[0].status, STOP_LONG)
         self.assertEqual(result.scans[0].reasons, ("data_source_incomplete",))
         self.assertEqual(store.states["PEPE"].status, NO_ADD)
+
+    def test_unmapped_active_long_stops_additions_when_oi_data_is_unavailable(self) -> None:
+        store = MemoryStore()
+        candles = _post_entry_candles()
+        store.states["PEPE"] = TradeSignalState(
+            status="long",
+            entry_price=100,
+            stop_loss=90,
+            entry_atr=1,
+            highest_close=100,
+            last_processed_candle_close_time=candles[-1].close_time,
+            binance_symbol="PEPEUSDT",
+            position_id="PEPE:entry",
+        )
+        notifier = RecordingNotifier()
+
+        result = _dispatch_trade_signals(
+            {"complete": True, "comparisons": []},
+            None,
+            lambda _: candles,
+            store,
+            notifier,
+        )
+
+        self.assertEqual(result.events, (STOP_LONG,))
+        self.assertEqual(result.scans[0].status, STOP_LONG)
+        self.assertEqual(result.scans[0].reasons, ("data_source_incomplete",))
+        self.assertEqual(store.states["PEPE"].status, NO_ADD)
+        self.assertEqual(notifier.stop_longs[0][0], "PEPE")
 
     def test_requires_exit_when_an_active_long_hits_its_atr_stop(self) -> None:
         store = MemoryStore()
@@ -613,10 +707,91 @@ class TradeDispatchTests(unittest.TestCase):
             ],
         }
 
-        with self.assertRaisesRegex(RuntimeError, "WeCom exit failed"):
-            dispatch_trade_signals(snapshot, lambda _: candles, store, FailingExitNotifier())
+        result = dispatch_trade_signals(
+            snapshot, lambda _: candles, store, FailingExitNotifier()
+        )
 
         self.assertEqual(store.states["PEPE"], original)
+        self.assertEqual(result.events, ())
+        self.assertEqual(result.failures[0].canonical_symbol, "PEPE")
+        self.assertIn("WeCom exit failed", result.failures[0].message)
+
+    def test_notification_failure_for_one_symbol_does_not_block_later_exits(self) -> None:
+        store = MemoryStore()
+        candles = _atr_exit_candles()
+        for symbol in ("PEPE", "DOGE"):
+            store.states[symbol] = TradeSignalState(
+                status="long",
+                entry_price=100,
+                stop_loss=98,
+                entry_atr=1,
+                highest_close=100,
+                last_processed_candle_close_time=899_999_999,
+                binance_symbol=f"{symbol}USDT",
+                position_id=f"{symbol}:entry",
+            )
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": symbol,
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [
+                        {"venue": "Binance", "symbol": f"{symbol}USDT"}
+                    ],
+                }
+                for symbol in ("PEPE", "DOGE")
+            ],
+        }
+        notifier = FailingFirstExitNotifier()
+
+        result = dispatch_trade_signals(
+            snapshot, lambda _: candles, store, notifier
+        )
+
+        self.assertEqual(result.events, (EXIT_LONG,))
+        self.assertEqual(result.failures[0].canonical_symbol, "PEPE")
+        self.assertEqual(notifier.exit_longs[0][0], "DOGE")
+        self.assertEqual(store.states["PEPE"].status, "long")
+        self.assertEqual(store.states["DOGE"].status, REENTRY_COOLDOWN)
+
+    def test_delivered_exit_is_not_repeated_when_state_write_retries(self) -> None:
+        store = FailFirstTradeStateWriteStore()
+        candles = _atr_exit_candles()
+        store.states["PEPE"] = TradeSignalState(
+            status="long",
+            entry_price=100,
+            stop_loss=98,
+            entry_atr=1,
+            highest_close=100,
+            last_processed_candle_close_time=899_999_999,
+            binance_symbol="PEPEUSDT",
+            position_id="PEPE:entry",
+        )
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+        notifier = RecordingNotifier()
+
+        failed = dispatch_trade_signals(snapshot, lambda _: candles, store, notifier)
+        retried = dispatch_trade_signals(
+            snapshot, lambda _: _post_entry_candles(), store, notifier
+        )
+
+        self.assertEqual(failed.events, ())
+        self.assertIn("state write failed", failed.failures[0].message)
+        self.assertEqual(retried.events, ())
+        self.assertEqual(len(notifier.exit_longs), 1)
+        self.assertEqual(store.states["PEPE"].status, REENTRY_COOLDOWN)
 
     def test_records_trailing_replay_gap_and_continues_other_symbols(self) -> None:
         store = MemoryStore()
@@ -909,6 +1084,34 @@ class TradeDispatchTests(unittest.TestCase):
 
         self.assertIs(store.state, previous_state)
 
+    def test_delivered_condition_list_is_not_repeated_when_state_write_retries(
+        self,
+    ) -> None:
+        now = datetime(2026, 8, 1, 1, 0, tzinfo=timezone.utc)
+        previous_state = SimpleNamespace(
+            can_long=("AKE",),
+            stop_long=("ON",),
+            exit_long=(),
+            last_sent_at=now - timedelta(minutes=5),
+        )
+        store = FailFirstConditionListStateWriteStore(previous_state)
+        notifier = ConditionListNotifier()
+        scans = (
+            _condition_scan("AKE", CAN_LONG),
+            _condition_scan("BULLA", CAN_LONG),
+            _condition_scan("ON", STOP_LONG),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "list state write failed"):
+            dispatch_trade_condition_list(scans, store, notifier, now)
+        retried = dispatch_trade_condition_list(
+            scans, store, notifier, now + timedelta(minutes=2)
+        )
+
+        self.assertEqual(retried, "updated")
+        self.assertEqual(len(notifier.lists), 1)
+        self.assertEqual(store.state.can_long, ("AKE", "BULLA"))
+
     def test_exits_if_protection_is_breached_after_rsi_stops_additions(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()
@@ -979,18 +1182,19 @@ class TradeDispatchTests(unittest.TestCase):
             ],
         }
 
-        with self.assertRaisesRegex(RuntimeError, "WeCom failed"):
-            dispatch_trade_signals(
-                snapshot,
-                lambda _: candles,
-                store,
-                FailingTradeSignalNotifier(),
-            )
+        result = dispatch_trade_signals(
+            snapshot,
+            lambda _: candles,
+            store,
+            FailingTradeSignalNotifier(),
+        )
 
         persisted = store.get_trade_signal_state("PEPE")
         self.assertEqual(persisted.status, NO_ADD)
         self.assertEqual(persisted.entry_price, previous_state.entry_price)
         self.assertEqual(persisted.binance_symbol, "PEPEUSDT")
+        self.assertEqual(result.events, ())
+        self.assertIn("WeCom failed", result.failures[0].message)
 
     def test_requires_oi_to_market_cap_strictly_above_90_percent(self) -> None:
         store = MemoryStore()

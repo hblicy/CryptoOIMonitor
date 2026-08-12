@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import shutil
@@ -28,6 +29,7 @@ class SnapshotStore:
         self.retention_days = retention_days
         self.min_free_bytes = min_free_bytes
         self._initialize()
+        self.apply_pending_trade_signal_states()
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.database_path)
@@ -74,6 +76,7 @@ class SnapshotStore:
                 ("highest_close", "REAL"),
                 ("last_processed_candle_close_time", "INTEGER"),
                 ("binance_symbol", "TEXT"),
+                ("position_id", "TEXT"),
             ):
                 if column not in columns:
                     connection.execute(
@@ -102,6 +105,33 @@ class SnapshotStore:
                     "ALTER TABLE trade_condition_list_state "
                     "ADD COLUMN exit_long_symbols TEXT NOT NULL DEFAULT '[]'"
                 )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notification_deliveries (
+                    event_id TEXT PRIMARY KEY,
+                    delivered_at TEXT NOT NULL,
+                    canonical_symbol TEXT,
+                    trade_state_payload TEXT,
+                    state_applied INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+            delivery_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(notification_deliveries)"
+                )
+            }
+            for column, definition in (
+                ("canonical_symbol", "TEXT"),
+                ("trade_state_payload", "TEXT"),
+                ("state_applied", "INTEGER NOT NULL DEFAULT 1"),
+            ):
+                if column not in delivery_columns:
+                    connection.execute(
+                        f"ALTER TABLE notification_deliveries "
+                        f"ADD COLUMN {column} {definition}"
+                    )
 
     def _migrate_trade_signal_states(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute(
@@ -295,7 +325,7 @@ class SnapshotStore:
                 """
                 SELECT side, entry_price, stop_loss, cooldown_until_candle_close_time,
                        entry_atr, highest_close, last_processed_candle_close_time,
-                       binance_symbol
+                       binance_symbol, position_id
                 FROM trade_signal_states
                 WHERE canonical_symbol = ?
                 """,
@@ -314,6 +344,7 @@ class SnapshotStore:
                     None if row[6] is None else int(row[6])
                 ),
                 binance_symbol=None if row[7] is None else str(row[7]),
+                position_id=None if row[8] is None else str(row[8]),
             )
             if state.status in {"long", "no_add"} and (
                 state.entry_price is None
@@ -350,7 +381,15 @@ class SnapshotStore:
         self, canonical_symbol: str, state: TradeSignalState
     ) -> None:
         with self._connect() as connection:
-            connection.execute(
+            self._set_trade_signal_state(connection, canonical_symbol, state)
+
+    @staticmethod
+    def _set_trade_signal_state(
+        connection: sqlite3.Connection,
+        canonical_symbol: str,
+        state: TradeSignalState,
+    ) -> None:
+        connection.execute(
                 """
                 INSERT INTO trade_signal_states (
                     canonical_symbol,
@@ -361,8 +400,9 @@ class SnapshotStore:
                     entry_atr,
                     highest_close,
                     last_processed_candle_close_time,
-                    binance_symbol
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    binance_symbol,
+                    position_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(canonical_symbol) DO UPDATE SET
                     side = excluded.side,
                     entry_price = excluded.entry_price,
@@ -371,7 +411,8 @@ class SnapshotStore:
                     entry_atr = excluded.entry_atr,
                     highest_close = excluded.highest_close,
                     last_processed_candle_close_time = excluded.last_processed_candle_close_time,
-                    binance_symbol = excluded.binance_symbol
+                    binance_symbol = excluded.binance_symbol,
+                    position_id = excluded.position_id
                 """,
                 (
                     canonical_symbol,
@@ -383,8 +424,9 @@ class SnapshotStore:
                     state.highest_close,
                     state.last_processed_candle_close_time,
                     state.binance_symbol,
+                    state.position_id,
                 ),
-            )
+        )
 
     def clear_trade_signal_state(self, canonical_symbol: str) -> None:
         with self._connect() as connection:
@@ -392,6 +434,99 @@ class SnapshotStore:
                 "DELETE FROM trade_signal_states WHERE canonical_symbol = ?",
                 (canonical_symbol,),
             )
+
+    def notification_was_delivered(self, event_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM notification_deliveries WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+        return row is not None
+
+    def mark_notification_delivered(self, event_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO notification_deliveries (event_id, delivered_at)
+                VALUES (?, ?)
+                ON CONFLICT(event_id) DO NOTHING
+                """,
+                (event_id, datetime.now(timezone.utc).isoformat()),
+            )
+
+    def mark_trade_notification_delivered(
+        self, event_id: str, canonical_symbol: str, state: TradeSignalState
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO notification_deliveries (
+                    event_id,
+                    delivered_at,
+                    canonical_symbol,
+                    trade_state_payload,
+                    state_applied
+                ) VALUES (?, ?, ?, ?, 0)
+                ON CONFLICT(event_id) DO NOTHING
+                """,
+                (
+                    event_id,
+                    datetime.now(timezone.utc).isoformat(),
+                    canonical_symbol,
+                    json.dumps(
+                        asdict(state), separators=(",", ":"), allow_nan=False
+                    ),
+                ),
+            )
+
+    def mark_trade_notification_state_applied(self, event_id: str) -> None:
+        with self._connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM notification_deliveries WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+            if exists is None:
+                raise RuntimeError(
+                    f"Notification delivery receipt is missing for {event_id}"
+                )
+            connection.execute(
+                """
+                UPDATE notification_deliveries
+                SET state_applied = 1
+                WHERE event_id = ?
+                """,
+                (event_id,),
+            )
+
+    def apply_pending_trade_signal_states(self) -> None:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT event_id, canonical_symbol, trade_state_payload
+                FROM notification_deliveries
+                WHERE state_applied = 0
+                ORDER BY delivered_at, event_id
+                """
+            ).fetchall()
+            for event_id, canonical_symbol, payload in rows:
+                if canonical_symbol is None or payload is None:
+                    raise RuntimeError(
+                        f"Pending notification {event_id} has no trade state payload"
+                    )
+                state = TradeSignalState(**json.loads(payload))
+                self._set_trade_signal_state(
+                    connection, str(canonical_symbol), state
+                )
+                connection.execute(
+                    """
+                    UPDATE notification_deliveries
+                    SET state_applied = 1
+                    WHERE event_id = ?
+                    """,
+                    (event_id,),
+                )
+        if rows:
+            LOGGER.info("Applied %s pending trade signal state transitions", len(rows))
 
     def get_trade_condition_list_state(self) -> TradeConditionListState:
         with self._connect() as connection:

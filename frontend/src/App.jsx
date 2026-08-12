@@ -15,6 +15,15 @@ export const TRADE_VENUES = SOURCE_GROUPS
   .filter((group) => group.label !== "MC")
   .flatMap((group) => group.sources);
 
+const MANUAL_REFRESH_TOKEN_KEY = "crypto-oi-monitor-manual-refresh-token";
+
+export function manualRefreshRequestOptions(token) {
+  return {
+    method: "POST",
+    headers: { "X-Manual-Refresh-Token": token },
+  };
+}
+
 export function sourceHealthSummary(sources) {
   const sourceNames = SOURCE_GROUPS.flatMap((group) => group.sources);
   return {
@@ -99,10 +108,22 @@ function App() {
   }
 
   async function refresh() {
+    let token = window.sessionStorage.getItem(MANUAL_REFRESH_TOKEN_KEY);
+    if (!token) {
+      token = window.prompt("请输入 MANUAL_REFRESH_TOKEN 以执行手动刷新：")?.trim();
+      if (!token) return;
+      window.sessionStorage.setItem(MANUAL_REFRESH_TOKEN_KEY, token);
+    }
     setRefreshing(true);
     try {
-      const response = await fetch("/api/refresh", { method: "POST" });
+      const response = await fetch(
+        "/api/refresh",
+        manualRefreshRequestOptions(token),
+      );
       const payload = await response.json();
+      if (response.status === 403) {
+        window.sessionStorage.removeItem(MANUAL_REFRESH_TOKEN_KEY);
+      }
       if (!response.ok) throw new Error(payload.error || "刷新失败");
       setSummary(payload);
       setRequestError("");

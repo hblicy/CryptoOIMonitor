@@ -3,6 +3,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+import hashlib
+import json
 import logging
 from typing import Any, Callable, Protocol
 
@@ -53,6 +55,7 @@ class TradeSignalState:
     highest_close: float | None = None
     last_processed_candle_close_time: int | None = None
     binance_symbol: str | None = None
+    position_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -184,6 +187,10 @@ class TradeConditionListStateStore(Protocol):
 
     def set_trade_condition_list_state(self, state: TradeConditionListState) -> None: ...
 
+    def notification_was_delivered(self, event_id: str) -> bool: ...
+
+    def mark_notification_delivered(self, event_id: str) -> None: ...
+
 
 class TradeConditionListNotifier(Protocol):
     def send_trade_condition_list(
@@ -196,6 +203,8 @@ class TradeConditionListNotifier(Protocol):
 
 
 class TradeSignalStateStore(Protocol):
+    def apply_pending_trade_signal_states(self) -> None: ...
+
     def list_trade_signal_states(self) -> dict[str, TradeSignalState]: ...
 
     def get_trade_signal_state(
@@ -207,6 +216,16 @@ class TradeSignalStateStore(Protocol):
     ) -> None: ...
 
     def clear_trade_signal_state(self, canonical_symbol: str) -> None: ...
+
+    def notification_was_delivered(self, event_id: str) -> bool: ...
+
+    def mark_notification_delivered(self, event_id: str) -> None: ...
+
+    def mark_trade_notification_delivered(
+        self, event_id: str, canonical_symbol: str, state: TradeSignalState
+    ) -> None: ...
+
+    def mark_trade_notification_state_applied(self, event_id: str) -> None: ...
 
 
 class TradeSignalNotifier(Protocol):
@@ -234,6 +253,91 @@ class TradeSignalNotifier(Protocol):
         cooldown_candles: int,
     ) -> None: ...
 
+
+def _deliver_notification_once(
+    store: TradeConditionListStateStore | TradeSignalStateStore,
+    event_id: str,
+    sender: Callable[[], None],
+) -> bool:
+    if store.notification_was_delivered(event_id):
+        LOGGER.info("Skipping previously delivered notification %s", event_id)
+        return False
+    sender()
+    store.mark_notification_delivered(event_id)
+    return True
+
+
+def _deliver_trade_notification_once(
+    store: TradeSignalStateStore,
+    event_id: str,
+    canonical_symbol: str,
+    next_state: TradeSignalState,
+    sender: Callable[[], None],
+) -> bool:
+    if store.notification_was_delivered(event_id):
+        LOGGER.info("Skipping previously delivered notification %s", event_id)
+        return False
+    sender()
+    store.mark_trade_notification_delivered(
+        event_id, canonical_symbol, next_state
+    )
+    return True
+
+
+def _position_lifecycle_id(
+    canonical_symbol: str, state: TradeSignalState
+) -> str:
+    if state.position_id is not None:
+        return state.position_id
+    return ":".join(
+        (
+            "legacy",
+            canonical_symbol,
+            repr(state.entry_price),
+            repr(state.entry_atr),
+        )
+    )
+
+
+def _trade_notification_event_id(
+    event_type: str,
+    canonical_symbol: str,
+    *,
+    state: TradeSignalState | None = None,
+    candle_close_time: int | None = None,
+) -> str:
+    lifecycle = (
+        _position_lifecycle_id(canonical_symbol, state)
+        if state is not None
+        else str(candle_close_time)
+    )
+    return f"trade:{event_type}:{canonical_symbol}:{lifecycle}"
+
+
+def _condition_list_notification_event_id(
+    event: str,
+    previous: TradeConditionListState,
+    can_long: tuple[str, ...],
+    stop_long: tuple[str, ...],
+    exit_long: tuple[str, ...],
+) -> str:
+    payload = json.dumps(
+        {
+            "event": event,
+            "previous_sent_at": (
+                None
+                if previous.last_sent_at is None
+                else previous.last_sent_at.isoformat()
+            ),
+            "can_long": can_long,
+            "stop_long": stop_long,
+            "exit_long": exit_long,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"trade-condition-list:{digest}"
 
 def dispatch_trade_condition_list(
     scans: tuple[TradeConditionScan, ...],
@@ -280,8 +384,15 @@ def dispatch_trade_condition_list(
     )
     event = "updated" if has_new_symbols else "periodic" if periodic else None
     if event is not None:
-        notifier.send_trade_condition_list(
-            can_long, stop_long, exit_long, event == "periodic"
+        event_id = _condition_list_notification_event_id(
+            event, previous, can_long, stop_long, exit_long
+        )
+        _deliver_notification_once(
+            store,
+            event_id,
+            lambda: notifier.send_trade_condition_list(
+                can_long, stop_long, exit_long, event == "periodic"
+            ),
         )
         store.set_trade_condition_list_state(
             TradeConditionListState(can_long, stop_long, exit_long, now)
@@ -296,6 +407,7 @@ def dispatch_trade_signals(
     store: TradeSignalStateStore,
     notifier: TradeSignalNotifier,
 ) -> TradeSignalDispatchResult:
+    store.apply_pending_trade_signal_states()
     complete = snapshot["complete"] is True
     reference_oi = _reference_oi_by_symbol(reference_snapshot)
     persisted_states = {
@@ -366,6 +478,17 @@ def dispatch_trade_signals(
             scan_order.append(scan.canonical_symbol)
         scan_by_symbol[scan.canonical_symbol] = scan
 
+    def record_candidate_failure(
+        canonical_symbol: str, error: Exception
+    ) -> TradeSignalDispatchFailure:
+        failure = TradeSignalDispatchFailure(
+            canonical_symbol, f"{type(error).__name__}: {error}"
+        )
+        failures.append(failure)
+        failures_by_symbol[canonical_symbol] = failure
+        LOGGER.exception("Trade signal action failed for %s", canonical_symbol)
+        return failure
+
     if complete:
         eligible_comparisons = [
             comparison
@@ -398,11 +521,33 @@ def dispatch_trade_signals(
                 and ratio <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO
             ):
                 reasons = ("oi_to_market_cap_not_above_90",)
-                notifier.send_stop_long(comparison, None, reasons)
-                store.set_trade_signal_state(
-                    canonical_symbol,
-                    replace(state, status=NO_ADD, binance_symbol=binance_symbol),
+                set_scan(
+                    _state_condition_scan(
+                        comparison, None, STOP_LONG, reasons
+                    )
                 )
+                try:
+                    next_state = replace(
+                        state, status=NO_ADD, binance_symbol=binance_symbol
+                    )
+                    event_id = _trade_notification_event_id(
+                        STOP_LONG, canonical_symbol, state=state
+                    )
+                    _deliver_trade_notification_once(
+                        store,
+                        event_id,
+                        canonical_symbol,
+                        next_state,
+                        lambda: notifier.send_stop_long(comparison, None, reasons),
+                    )
+                    store.set_trade_signal_state(
+                        canonical_symbol,
+                        next_state,
+                    )
+                    store.mark_trade_notification_state_applied(event_id)
+                except Exception as error:
+                    record_candidate_failure(canonical_symbol, error)
+                    continue
                 dispatched.append(STOP_LONG)
                 details.append(
                     TradeSignalEvent(
@@ -414,11 +559,6 @@ def dispatch_trade_signals(
                         None,
                         ratio,
                         reasons=reasons,
-                    )
-                )
-                set_scan(
-                    _state_condition_scan(
-                        comparison, None, STOP_LONG, reasons
                     )
                 )
             elif state is not None and canonical_symbol in failures_by_symbol:
@@ -453,14 +593,16 @@ def dispatch_trade_signals(
                     )
                 )
                 continue
-            store.clear_trade_signal_state(canonical_symbol)
+            try:
+                store.clear_trade_signal_state(canonical_symbol)
+            except Exception as error:
+                record_candidate_failure(canonical_symbol, error)
+                continue
             state = None
         if state is not None:
             original_state = state
             if state.binance_symbol != binance_symbol:
                 state = replace(state, binance_symbol=binance_symbol)
-                store.set_trade_signal_state(canonical_symbol, state)
-                original_state = state
             if (
                 state.entry_price is not None
                 and state.stop_loss is not None
@@ -529,16 +671,16 @@ def dispatch_trade_signals(
                     cooldown_candles,
                     canonical_symbol,
                 )
-                notifier.send_exit_long(
-                    comparison,
-                    exit_indicators,
-                    state,
-                    forced_exit_reasons,
-                    cooldown_candles,
+                set_scan(
+                    _state_condition_scan(
+                        comparison,
+                        exit_indicators,
+                        EXIT_LONG,
+                        forced_exit_reasons,
+                    )
                 )
-                store.set_trade_signal_state(
-                    canonical_symbol,
-                    TradeSignalState(
+                try:
+                    next_state = TradeSignalState(
                         status=REENTRY_COOLDOWN,
                         cooldown_until_candle_close_time=(
                             exit_indicators.candle_close_time
@@ -546,8 +688,34 @@ def dispatch_trade_signals(
                             * FIFTEEN_MINUTES_MILLISECONDS
                         ),
                         binance_symbol=binance_symbol,
-                    ),
-                )
+                        position_id=_position_lifecycle_id(
+                            canonical_symbol, state
+                        ),
+                    )
+                    event_id = _trade_notification_event_id(
+                        EXIT_LONG, canonical_symbol, state=state
+                    )
+                    _deliver_trade_notification_once(
+                        store,
+                        event_id,
+                        canonical_symbol,
+                        next_state,
+                        lambda: notifier.send_exit_long(
+                            comparison,
+                            exit_indicators,
+                            state,
+                            forced_exit_reasons,
+                            cooldown_candles,
+                        ),
+                    )
+                    store.set_trade_signal_state(
+                        canonical_symbol,
+                        next_state,
+                    )
+                    store.mark_trade_notification_state_applied(event_id)
+                except Exception as error:
+                    record_candidate_failure(canonical_symbol, error)
+                    continue
                 dispatched.append(EXIT_LONG)
                 details.append(
                     TradeSignalEvent(
@@ -565,29 +733,44 @@ def dispatch_trade_signals(
                         cooldown_candles=cooldown_candles,
                     )
                 )
-                set_scan(
-                    _state_condition_scan(
-                        comparison,
-                        exit_indicators,
-                        EXIT_LONG,
-                        forced_exit_reasons,
-                    )
-                )
                 continue
             if state != original_state:
-                store.set_trade_signal_state(canonical_symbol, state)
-            if (
-                complete
-                and ratio is not None
-                and ratio <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO
+                try:
+                    store.set_trade_signal_state(canonical_symbol, state)
+                except Exception as error:
+                    record_candidate_failure(canonical_symbol, error)
+                    continue
+            if complete and (
+                ratio is None or comparison.get("total_oi_usd") is None
             ):
-                reasons = ("oi_to_market_cap_not_above_90",)
-                if state.status == LONG:
-                    notifier.send_stop_long(comparison, indicators, reasons)
-                    store.set_trade_signal_state(
-                        canonical_symbol,
-                        replace(state, status=NO_ADD),
+                reasons = ("data_source_incomplete",)
+                set_scan(
+                    _state_condition_scan(
+                        comparison, indicators, STOP_LONG, reasons
                     )
+                )
+                if state.status == LONG:
+                    try:
+                        next_state = replace(state, status=NO_ADD)
+                        event_id = _trade_notification_event_id(
+                            STOP_LONG, canonical_symbol, state=state
+                        )
+                        _deliver_trade_notification_once(
+                            store,
+                            event_id,
+                            canonical_symbol,
+                            next_state,
+                            lambda: notifier.send_stop_long(
+                                comparison, indicators, reasons
+                            ),
+                        )
+                        store.set_trade_signal_state(
+                            canonical_symbol, next_state
+                        )
+                        store.mark_trade_notification_state_applied(event_id)
+                    except Exception as error:
+                        record_candidate_failure(canonical_symbol, error)
+                        continue
                     dispatched.append(STOP_LONG)
                     details.append(
                         TradeSignalEvent(
@@ -601,19 +784,84 @@ def dispatch_trade_signals(
                             reasons=reasons,
                         )
                     )
+                continue
+            if (
+                complete
+                and ratio is not None
+                and ratio <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO
+            ):
+                reasons = ("oi_to_market_cap_not_above_90",)
                 set_scan(
                     _state_condition_scan(
                         comparison, indicators, STOP_LONG, reasons
                     )
                 )
+                if state.status == LONG:
+                    try:
+                        next_state = replace(state, status=NO_ADD)
+                        event_id = _trade_notification_event_id(
+                            STOP_LONG, canonical_symbol, state=state
+                        )
+                        _deliver_trade_notification_once(
+                            store,
+                            event_id,
+                            canonical_symbol,
+                            next_state,
+                            lambda: notifier.send_stop_long(
+                                comparison, indicators, reasons
+                            ),
+                        )
+                        store.set_trade_signal_state(
+                            canonical_symbol,
+                            next_state,
+                        )
+                        store.mark_trade_notification_state_applied(event_id)
+                    except Exception as error:
+                        record_candidate_failure(canonical_symbol, error)
+                        continue
+                    dispatched.append(STOP_LONG)
+                    details.append(
+                        TradeSignalEvent(
+                            STOP_LONG,
+                            canonical_symbol,
+                            indicators.candle_close_time,
+                            indicators.rsi,
+                            indicators.close,
+                            indicators.ema200,
+                            ratio,
+                            reasons=reasons,
+                        )
+                    )
                 continue
             reasons = stop_long_reasons(indicators)
             if state.status == LONG and reasons:
-                notifier.send_stop_long(comparison, indicators, reasons)
-                store.set_trade_signal_state(
-                    canonical_symbol,
-                    replace(state, status=NO_ADD),
+                set_scan(
+                    _state_condition_scan(
+                        comparison, indicators, STOP_LONG, reasons
+                    )
                 )
+                try:
+                    next_state = replace(state, status=NO_ADD)
+                    event_id = _trade_notification_event_id(
+                        STOP_LONG, canonical_symbol, state=state
+                    )
+                    _deliver_trade_notification_once(
+                        store,
+                        event_id,
+                        canonical_symbol,
+                        next_state,
+                        lambda: notifier.send_stop_long(
+                            comparison, indicators, reasons
+                        ),
+                    )
+                    store.set_trade_signal_state(
+                        canonical_symbol,
+                        next_state,
+                    )
+                    store.mark_trade_notification_state_applied(event_id)
+                except Exception as error:
+                    record_candidate_failure(canonical_symbol, error)
+                    continue
                 dispatched.append(STOP_LONG)
                 details.append(
                     TradeSignalEvent(
@@ -625,11 +873,6 @@ def dispatch_trade_signals(
                         ema200=indicators.ema200,
                         oi_to_market_cap=comparison["oi_to_market_cap"],
                         reasons=reasons,
-                    )
-                )
-                set_scan(
-                    _state_condition_scan(
-                        comparison, indicators, STOP_LONG, reasons
                     )
                 )
                 continue
@@ -694,15 +937,11 @@ def dispatch_trade_signals(
         if signal is None:
             continue
         previous_aggregate_oi_usd = reference_oi[canonical_symbol]
-        notifier.send_trade_signal(
-            signal,
-            comparison,
-            previous_aggregate_oi_usd,
-            signal_event_type,
+        set_scan(
+            _state_condition_scan(comparison, indicators, CAN_LONG, ())
         )
-        store.set_trade_signal_state(
-            canonical_symbol,
-            TradeSignalState(
+        try:
+            next_state = TradeSignalState(
                 status=signal.side,
                 entry_price=signal.entry_price,
                 stop_loss=signal.stop_loss,
@@ -710,8 +949,33 @@ def dispatch_trade_signals(
                 highest_close=signal.entry_price,
                 last_processed_candle_close_time=signal.candle_close_time,
                 binance_symbol=binance_symbol,
-            ),
-        )
+                position_id=f"{canonical_symbol}:{signal.candle_close_time}",
+            )
+            event_id = _trade_notification_event_id(
+                signal_event_type,
+                canonical_symbol,
+                candle_close_time=signal.candle_close_time,
+            )
+            _deliver_trade_notification_once(
+                store,
+                event_id,
+                canonical_symbol,
+                next_state,
+                lambda: notifier.send_trade_signal(
+                    signal,
+                    comparison,
+                    previous_aggregate_oi_usd,
+                    signal_event_type,
+                ),
+            )
+            store.set_trade_signal_state(
+                canonical_symbol,
+                next_state,
+            )
+            store.mark_trade_notification_state_applied(event_id)
+        except Exception as error:
+            record_candidate_failure(canonical_symbol, error)
+            continue
         if signal_event_type == RESUME_LONG:
             LOGGER.info(
                 "Resumed long signal for %s at closed candle %s",
@@ -747,9 +1011,6 @@ def dispatch_trade_signals(
                     previous_aggregate_oi_usd / signal.previous_close
                 ),
             )
-        )
-        set_scan(
-            _state_condition_scan(comparison, indicators, CAN_LONG, ())
         )
     scans = [scan_by_symbol[symbol] for symbol in scan_order]
     return TradeSignalDispatchResult(

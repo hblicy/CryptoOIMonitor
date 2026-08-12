@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -42,6 +43,7 @@ from crypto_oi_monitor.sources import (
 from crypto_oi_monitor.storage import SnapshotStore
 from crypto_oi_monitor.trade_dispatch import (
     NO_ADD,
+    REENTRY_COOLDOWN,
     TradeConditionScanResult,
     dispatch_trade_condition_list,
     dispatch_trade_signals,
@@ -187,6 +189,9 @@ class MonitorApplication:
         self._clock = monotonic
         self._manual_refresh_min_interval_seconds = manual_refresh_min_interval_seconds
         self._last_manual_refresh_completed_at: float | None = None
+        self._manual_refresh_token = (
+            os.environ.get("MANUAL_REFRESH_TOKEN", "").strip() or None
+        )
         self._latest = self.store.load_latest_snapshot()
 
     def refresh(self) -> dict[str, Any]:
@@ -209,7 +214,7 @@ class MonitorApplication:
                 active_assets.update(
                     canonical_symbol
                     for canonical_symbol, state in self.store.list_trade_signal_states().items()
-                    if state.status in {LONG, NO_ADD}
+                    if state.status in {LONG, NO_ADD, REENTRY_COOLDOWN}
                 )
                 removed_alerts, removed_trade_signals = self.store.clear_states_outside(
                     active_assets
@@ -379,6 +384,12 @@ class MonitorApplication:
         finally:
             self._lock.release()
 
+    def manual_refresh_is_authorized(self, provided_token: str | None) -> bool:
+        configured_token = getattr(self, "_manual_refresh_token", None)
+        if configured_token is None or provided_token is None:
+            return False
+        return hmac.compare_digest(configured_token, provided_token)
+
     def summary(self) -> dict[str, Any]:
         return self._latest or {
             "state": "waiting_for_first_refresh",
@@ -404,6 +415,15 @@ class MonitorHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if urlparse(self.path).path != "/api/refresh":
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+            return
+        if not self.application.manual_refresh_is_authorized(
+            self.headers.get("X-Manual-Refresh-Token")
+        ):
+            LOGGER.warning("Rejected unauthorized manual refresh request")
+            self._send_json(
+                HTTPStatus.FORBIDDEN,
+                {"error": "手动刷新未授权或已停用。"},
+            )
             return
         try:
             self._send_json(HTTPStatus.OK, self.application.manual_refresh())
@@ -471,7 +491,12 @@ class MonitorHandler(BaseHTTPRequestHandler):
 def next_refresh_schedule(
     previous_deadline: float, finished_at: float, interval_seconds: int
 ) -> tuple[float, float]:
-    next_deadline = max(previous_deadline + interval_seconds, finished_at)
+    scheduled_deadline = previous_deadline + interval_seconds
+    next_deadline = (
+        finished_at + interval_seconds
+        if finished_at >= scheduled_deadline
+        else scheduled_deadline
+    )
     return next_deadline, max(0.0, next_deadline - finished_at)
 
 
