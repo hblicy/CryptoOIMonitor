@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import logging
+import math
 import re
 from time import monotonic
 from typing import Any, Callable, Protocol
@@ -26,6 +27,10 @@ class MarketCap:
     market_cap_id: str
     market_cap_usd: float
 
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.market_cap_usd) or self.market_cap_usd <= 0:
+            raise ValueError("Market cap must be finite positive")
+
 
 @dataclass(frozen=True)
 class MarketCapCandidate:
@@ -37,6 +42,21 @@ class MarketCapCandidate:
     market_cap_usd: float | None
     binance_price_usd: float | None
     price_difference_percent: float | None
+
+    def __post_init__(self) -> None:
+        values = (
+            self.price_usd,
+            self.market_cap_usd,
+            self.binance_price_usd,
+            self.price_difference_percent,
+        )
+        if any(
+            value is not None and (not math.isfinite(value) or value < 0)
+            for value in values
+        ):
+            raise ValueError(
+                "CoinMarketCap candidate values must be finite non-negative"
+            )
 
     def as_dict(self) -> dict[str, str | float | None]:
         return {
@@ -99,7 +119,6 @@ class CachedMarketCapLoader:
         self.mapping_cache: dict[str, str] = {}
         self.unmapped_retry_at: dict[str, float] = {}
         self.unmapped_candidate_cache: dict[str, tuple[MarketCapCandidate, ...]] = {}
-        self.cached_assets: frozenset[str] | None = None
         self.cached_lookup: MarketCapLookup | None = None
         self.last_refresh_at: float | None = None
 
@@ -112,11 +131,24 @@ class CachedMarketCapLoader:
         now = self.clock()
         if (
             self.cached_lookup is not None
-            and self.cached_assets == assets
             and self.last_refresh_at is not None
             and now - self.last_refresh_at < self.refresh_seconds
         ):
-            return self.cached_lookup
+            market_caps = {
+                asset: market_cap
+                for asset, market_cap in self.cached_lookup.market_caps.items()
+                if asset in assets
+            }
+            return MarketCapLookup(
+                market_caps=market_caps,
+                unmapped_assets=tuple(sorted(assets - set(market_caps))),
+                refreshed_at=self.cached_lookup.refreshed_at,
+                unmapped_candidates=tuple(
+                    candidate
+                    for candidate in self.cached_lookup.unmapped_candidates
+                    if candidate.asset in assets
+                ),
+            )
         mapping_assets = {
             asset
             for asset in assets
@@ -180,7 +212,6 @@ class CachedMarketCapLoader:
                 for candidate in self.unmapped_candidate_cache.get(asset, ())
             ),
         )
-        self.cached_assets = assets
         self.cached_lookup = lookup
         self.last_refresh_at = now
         LOGGER.info(

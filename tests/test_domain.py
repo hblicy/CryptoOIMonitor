@@ -38,6 +38,21 @@ class BinanceUniverseTests(unittest.TestCase):
 
 
 class AggregationTests(unittest.TestCase):
+    def test_rejects_non_finite_or_negative_contract_oi(self) -> None:
+        for value in (float("nan"), float("inf"), -1):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "finite non-negative"):
+                    ContractOpenInterest("Binance", "ETHUSDT", value, "ETH")
+
+    def test_rejects_an_overflowed_aggregate_oi_total(self) -> None:
+        contracts = (
+            ContractOpenInterest("Binance", "BTCUSDT", 1e308),
+            ContractOpenInterest("OKX", "BTC-USDT-SWAP", 1e308),
+        )
+
+        with self.assertRaisesRegex(ValueError, "Aggregate OI must be finite"):
+            aggregate_asset("BTC", "1", 1_000_000, contracts)
+
     def test_sums_venue_oi_and_calculates_ratio(self) -> None:
         comparison = aggregate_asset(
             canonical_symbol="ETH",

@@ -1,20 +1,34 @@
 import json
+from logging.handlers import RotatingFileHandler
 import os
+from pathlib import Path
+import tempfile
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import ANY, patch
 from argparse import ArgumentTypeError
 
-from app import MonitorApplication, next_refresh_schedule, positive_refresh_seconds
+from app import (
+    configure_logging,
+    encode_json_payload,
+    ManualRefreshRejected,
+    MonitorApplication,
+    next_refresh_schedule,
+    positive_refresh_seconds,
+    required_environment_value,
+)
 from crypto_oi_monitor.trade_dispatch import (
     EXIT_LONG,
+    NO_ADD,
     TradeConditionScan,
     TradeConditionScanResult,
     TradeSignalEvent,
     TradeSignalDispatchFailure,
     TradeSignalDispatchResult,
+    TradeSignalState,
 )
+from crypto_oi_monitor.trading import LONG
 
 
 class FakeCoordinator:
@@ -29,6 +43,7 @@ class FakeCoordinator:
 class FakeStore:
     def __init__(self) -> None:
         self.saved = []
+        self.trade_states = {}
 
     def save_snapshot(self, snapshot) -> None:
         self.saved.append(snapshot)
@@ -40,6 +55,9 @@ class FakeStore:
     def clear_states_outside(self, active_assets) -> None:
         self.active_assets = active_assets
         return 0, 0
+
+    def list_trade_signal_states(self):
+        return dict(self.trade_states)
 
 class TradeSignalOnlyNotifier:
     def send(self, event, comparison) -> None:
@@ -193,6 +211,23 @@ class AppRefreshTests(unittest.TestCase):
 
         self.assertEqual(application.store.active_assets, {"PEPE", "AAA"})
 
+    def test_keeps_active_trade_states_after_assets_leave_the_binance_universe(self) -> None:
+        application = MonitorApplication.__new__(MonitorApplication)
+        application.coordinator = FakeCoordinator()
+        application.store = FakeStore()
+        application.store.trade_states = {
+            "PEPE": TradeSignalState(status=LONG),
+            "DOGE": TradeSignalState(status=NO_ADD),
+            "OLD": TradeSignalState(status="reentry_cooldown"),
+        }
+        application.notifier = None
+        application.trade_kline_loader = object()
+        application._lock = threading.Lock()
+
+        application.refresh()
+
+        self.assertEqual(application.store.active_assets, {"PEPE", "DOGE"})
+
     def test_records_trade_signal_failures_without_breaking_snapshot_json(self) -> None:
         application = MonitorApplication.__new__(MonitorApplication)
         application.coordinator = FakeCoordinator()
@@ -308,6 +343,72 @@ class AppRefreshTests(unittest.TestCase):
         self.assertEqual(bingx_loader.call_args.args[0].timeout_seconds, 12)
         self.assertEqual(bingx_loader.call_args.args[1], {"ETH"})
         self.assertEqual(lighter_loader.call_args.args[1], {"ETH"})
+
+
+class ManualRefreshTests(unittest.TestCase):
+    def test_limits_successive_manual_refreshes_from_the_last_manual_completion(self) -> None:
+        application = MonitorApplication.__new__(MonitorApplication)
+        application._lock = threading.RLock()
+        application._manual_refresh_min_interval_seconds = 120
+        times = iter((100.0, 110.0, 150.0))
+        application._clock = lambda: next(times)
+        application.refresh = lambda: {"complete": True}
+
+        self.assertEqual(application.manual_refresh(), {"complete": True})
+        with self.assertRaises(ManualRefreshRejected) as raised:
+            application.manual_refresh()
+
+        self.assertEqual(raised.exception.retry_after_seconds, 80)
+
+    def test_rejects_immediately_when_another_refresh_holds_the_lock(self) -> None:
+        application = MonitorApplication.__new__(MonitorApplication)
+        application._lock = threading.Lock()
+        application._lock.acquire()
+        application._manual_refresh_min_interval_seconds = 120
+        application._clock = lambda: 200.0
+
+        try:
+            with self.assertRaisesRegex(ManualRefreshRejected, "正在刷新"):
+                application.manual_refresh()
+        finally:
+            application._lock.release()
+
+    def test_rejects_manual_refresh_inside_the_minimum_interval(self) -> None:
+        application = MonitorApplication.__new__(MonitorApplication)
+        application._lock = threading.Lock()
+        application._manual_refresh_min_interval_seconds = 120
+        application._last_manual_refresh_completed_at = 100.0
+        application._clock = lambda: 150.0
+
+        with self.assertRaises(ManualRefreshRejected) as raised:
+            application.manual_refresh()
+
+        self.assertEqual(raised.exception.retry_after_seconds, 70)
+
+
+class JsonResponseTests(unittest.TestCase):
+    def test_rejects_non_standard_json_numbers(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Out of range float values"):
+            encode_json_payload({"ratio": float("nan")})
+
+
+class StartupConfigurationTests(unittest.TestCase):
+    def test_rejects_empty_required_environment_value(self) -> None:
+        with patch.dict(os.environ, {"COINMARKETCAP_API_KEY": "   "}):
+            with self.assertRaisesRegex(RuntimeError, "must not be empty"):
+                required_environment_value("COINMARKETCAP_API_KEY")
+
+    def test_configures_a_rotating_log_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "app.logging.basicConfig"
+        ) as basic_config:
+            configure_logging(Path(temp_dir) / "monitor.log", 3, 2)
+            handler = basic_config.call_args.kwargs["handlers"][0]
+            self.assertIsInstance(handler, RotatingFileHandler)
+            self.assertEqual(handler.maxBytes, 3 * 1024**2)
+            self.assertEqual(handler.backupCount, 2)
+            self.assertTrue(basic_config.call_args.kwargs["force"])
+            handler.close()
 
 
 class RefreshScheduleTests(unittest.TestCase):

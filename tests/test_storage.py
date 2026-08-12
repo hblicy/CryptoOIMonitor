@@ -11,6 +11,17 @@ from crypto_oi_monitor.trade_dispatch import TradeConditionListState, TradeSigna
 
 
 class SnapshotStoreTests(unittest.TestCase):
+    def test_rejects_non_standard_json_numbers_in_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SnapshotStore(Path(temp_dir) / "monitor.db")
+
+            with self.assertRaisesRegex(ValueError, "Out of range float values"):
+                store.save_snapshot(
+                    {
+                        "captured_at": "2026-08-12T00:00:00+00:00",
+                        "comparisons": [{"oi_to_market_cap": float("nan")}],
+                    }
+                )
     def test_migrates_existing_condition_list_state_with_empty_must_exit_group(
         self,
     ) -> None:

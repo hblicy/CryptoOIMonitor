@@ -300,11 +300,11 @@ export function TradeConditionPanel({ scans, complete }) {
         <span>OI / 市值 &gt; 90%；15m 首次上穿 EMA200 且 EMA200 向上；价格校正 OI 增长；成交额突破前20根均量的1.2倍；RSI &lt; 60 且回升</span>
       </header>
       {!complete && <p className="trade-signal-empty">数据源不完整：已暂停新开仓，已有交易状态的 15m 风控仍在执行。</p>}
-      {!complete && !scans.length
-        ? <p className="trade-signal-empty">数据源不完整，本轮未执行交易条件扫描。</p>
-        : !scans.length
+      {!scans.length
+        ? complete
           ? <p className="trade-signal-empty">本轮没有 OI / 市值大于 90% 的标的。</p>
-          : <div className="trade-condition-groups">
+          : null
+        : <div className="trade-condition-groups">
             <TradeConditionGroup title="可以做多" status="can_long" scans={canLong} />
             <TradeConditionGroup title="停止做多" status="stop_long" scans={stopLong} />
             <TradeConditionGroup title="必须退出" status="exit_long" scans={exitLong} />

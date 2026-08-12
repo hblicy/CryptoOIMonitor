@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from logging.handlers import RotatingFileHandler
+import math
 import mimetypes
 import os
 import sys
@@ -39,14 +41,49 @@ from crypto_oi_monitor.sources import (
 )
 from crypto_oi_monitor.storage import SnapshotStore
 from crypto_oi_monitor.trade_dispatch import (
+    NO_ADD,
     TradeConditionScanResult,
     dispatch_trade_condition_list,
     dispatch_trade_signals,
     scan_trade_conditions,
 )
-from crypto_oi_monitor.trading import fetch_binance_closed_candles
+from crypto_oi_monitor.trading import LONG, fetch_binance_closed_candles
 
 LOGGER = logging.getLogger("crypto_oi_monitor")
+
+
+class ManualRefreshRejected(RuntimeError):
+    def __init__(self, message: str, retry_after_seconds: int) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
+def required_environment_value(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"{name} must not be empty")
+    return value
+
+
+def configure_logging(
+    log_file: Path | None, max_megabytes: int, backup_count: int
+) -> None:
+    options: dict[str, Any] = {
+        "level": logging.INFO,
+        "format": "%(asctime)s %(levelname)s %(message)s",
+        "force": True,
+    }
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        options["handlers"] = [
+            RotatingFileHandler(
+                log_file,
+                maxBytes=max_megabytes * 1024**2,
+                backupCount=backup_count,
+                encoding="utf-8",
+            )
+        ]
+    logging.basicConfig(**options)
 
 
 def _condition_scan_payload(result: TradeConditionScanResult) -> dict[str, Any]:
@@ -74,6 +111,7 @@ class MonitorApplication:
         cmc_refresh_seconds: int = 600,
         snapshot_retention_days: int = 30,
         min_free_disk_bytes: int = 2 * 1024**3,
+        manual_refresh_min_interval_seconds: int = 120,
     ) -> None:
         self.store = SnapshotStore(
             ROOT / "data" / "monitor.db",
@@ -82,7 +120,7 @@ class MonitorApplication:
         )
         public_client = HttpJsonClient()
         bingx_client = HttpJsonClient(timeout_seconds=BINGX_REQUEST_TIMEOUT_SECONDS)
-        cmc_api_key = os.environ["COINMARKETCAP_API_KEY"]
+        cmc_api_key = required_environment_value("COINMARKETCAP_API_KEY")
         cmc_client = HttpJsonClient({"X-CMC_PRO_API_KEY": cmc_api_key})
         market_cap_loader = CachedMarketCapLoader(
             cmc_client,
@@ -145,7 +183,10 @@ class MonitorApplication:
         self.notifier = (
             WeComNotifier(webhook_url, HttpJsonClient()) if webhook_url else None
         )
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._clock = monotonic
+        self._manual_refresh_min_interval_seconds = manual_refresh_min_interval_seconds
+        self._last_manual_refresh_completed_at: float | None = None
         self._latest = self.store.load_latest_snapshot()
 
     def refresh(self) -> dict[str, Any]:
@@ -165,6 +206,11 @@ class MonitorApplication:
                     comparison["canonical_symbol"]
                     for comparison in snapshot["comparisons"]
                 } | set(snapshot.get("unmapped_assets", []))
+                active_assets.update(
+                    canonical_symbol
+                    for canonical_symbol, state in self.store.list_trade_signal_states().items()
+                    if state.status in {LONG, NO_ADD}
+                )
                 removed_alerts, removed_trade_signals = self.store.clear_states_outside(
                     active_assets
                 )
@@ -303,11 +349,45 @@ class MonitorApplication:
             self._latest = snapshot
             return snapshot
 
+    def manual_refresh(self) -> dict[str, Any]:
+        if not self._lock.acquire(blocking=False):
+            raise ManualRefreshRejected("系统正在刷新，请稍后重试。", 1)
+        try:
+            now = getattr(self, "_clock", monotonic)()
+            last_completed_at = getattr(
+                self, "_last_manual_refresh_completed_at", None
+            )
+            minimum_interval = getattr(
+                self, "_manual_refresh_min_interval_seconds", 120
+            )
+            if (
+                last_completed_at is not None
+                and now - last_completed_at < minimum_interval
+            ):
+                retry_after = math.ceil(
+                    minimum_interval - (now - last_completed_at)
+                )
+                raise ManualRefreshRejected(
+                    f"距离上次刷新过近，请在 {retry_after} 秒后重试。",
+                    retry_after,
+                )
+            snapshot = self.refresh()
+            self._last_manual_refresh_completed_at = getattr(
+                self, "_clock", monotonic
+            )()
+            return snapshot
+        finally:
+            self._lock.release()
+
     def summary(self) -> dict[str, Any]:
         return self._latest or {
             "state": "waiting_for_first_refresh",
             "message": "等待首次数据刷新。",
         }
+
+
+def encode_json_payload(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
 class MonitorHandler(BaseHTTPRequestHandler):
@@ -326,7 +406,13 @@ class MonitorHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
         try:
-            self._send_json(HTTPStatus.OK, self.application.refresh())
+            self._send_json(HTTPStatus.OK, self.application.manual_refresh())
+        except ManualRefreshRejected as error:
+            self._send_json(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                {"error": str(error)},
+                {"Retry-After": str(error.retry_after_seconds)},
+            )
         except Exception as error:
             LOGGER.exception("手动刷新失败")
             self._send_json(
@@ -359,11 +445,18 @@ class MonitorHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
-    def _send_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
-        content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    def _send_json(
+        self,
+        status: HTTPStatus,
+        payload: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        content = encode_json_payload(payload)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(content)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self._cors_headers()
         self.end_headers()
         self.wfile.write(content)
@@ -432,12 +525,28 @@ def main() -> None:
         type=positive_refresh_seconds,
         default=os.environ.get("MIN_FREE_DISK_GB", "2"),
     )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=os.environ.get("LOG_FILE"),
+    )
+    parser.add_argument(
+        "--log-max-mb",
+        type=positive_refresh_seconds,
+        default=os.environ.get("LOG_MAX_MB", "50"),
+    )
+    parser.add_argument(
+        "--log-backup-count",
+        type=positive_refresh_seconds,
+        default=os.environ.get("LOG_BACKUP_COUNT", "5"),
+    )
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging(args.log_file, args.log_max_mb, args.log_backup_count)
     application = MonitorApplication(
         args.cmc_refresh_seconds,
         args.snapshot_retention_days,
         int(args.min_free_disk_gb * 1024**3),
+        args.refresh_seconds,
     )
     stopped = start_refresh_loop(application, args.refresh_seconds)
     handler = type(
@@ -454,4 +563,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        LOGGER.exception("服务异常退出")
+        raise

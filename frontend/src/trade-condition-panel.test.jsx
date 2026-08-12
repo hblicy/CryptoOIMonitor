@@ -27,4 +27,12 @@ describe("TradeConditionPanel", () => {
     expect(html).toContain("PEPE");
     expect(html).toContain("trade-signal-exit_long");
   });
+
+  it("shows only one incomplete-source notice when no scans are available", () => {
+    const html = renderToStaticMarkup(
+      <TradeConditionPanel complete={false} scans={[]} />,
+    );
+
+    expect(html.match(/\u6570\u636e\u6e90\u4e0d\u5b8c\u6574/g)).toHaveLength(1);
+  });
 });

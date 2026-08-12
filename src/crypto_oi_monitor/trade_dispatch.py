@@ -388,8 +388,8 @@ def dispatch_trade_signals(
         canonical_symbol = comparison["canonical_symbol"]
         ratio = comparison.get("oi_to_market_cap")
         binance_symbol = _binance_symbol(comparison)
-        candles = candles_by_symbol.get(canonical_symbol)
-        if candles is None:
+        replay_candles = candles_by_symbol.get(canonical_symbol)
+        if replay_candles is None:
             if (
                 complete
                 and state is not None
@@ -436,6 +436,7 @@ def dispatch_trade_signals(
                     )
                 )
             continue
+        candles = replay_candles[-REQUIRED_CLOSED_CANDLES:]
         indicators = trade_indicators(candles)
         if state is not None and state.status == REENTRY_COOLDOWN:
             if (
@@ -455,100 +456,74 @@ def dispatch_trade_signals(
             store.clear_trade_signal_state(canonical_symbol)
             state = None
         if state is not None:
+            original_state = state
             if state.binance_symbol != binance_symbol:
                 state = replace(state, binance_symbol=binance_symbol)
                 store.set_trade_signal_state(canonical_symbol, state)
+                original_state = state
             if (
                 state.entry_price is not None
                 and state.stop_loss is not None
                 and state.entry_atr is not None
                 and state.highest_close is not None
             ):
-                if state.last_processed_candle_close_time is None:
-                    LOGGER.warning(
-                        "Trailing history start is unknown for migrated state %s; continuing from candle %s",
-                        canonical_symbol,
-                        indicators.candle_close_time,
+                try:
+                    (
+                        state,
+                        exit_indicators,
+                        forced_exit_reasons,
+                        cooldown_candles,
+                    ) = _replay_active_position(
+                        canonical_symbol, replay_candles, state
                     )
-                    unprocessed_candles = [candles[-1]]
-                else:
-                    if (
-                        state.last_processed_candle_close_time
-                        > indicators.candle_close_time
-                    ):
-                        raise ValueError(
-                            "Stored trailing candle time is newer than Binance closed K-line "
-                            f"for {canonical_symbol}"
-                        )
-                    unprocessed_candles = [
-                        candle
-                        for candle in candles
-                        if candle.close_time
-                        > state.last_processed_candle_close_time
-                    ]
-                    if unprocessed_candles:
-                        expected_first_close_time = (
-                            state.last_processed_candle_close_time
-                            + FIFTEEN_MINUTES_MILLISECONDS
-                        )
-                        has_gap = (
-                            unprocessed_candles[0].close_time
-                            != expected_first_close_time
-                            or any(
-                                current.close_time - previous.close_time
-                                != FIFTEEN_MINUTES_MILLISECONDS
-                                for previous, current in zip(
-                                    unprocessed_candles,
-                                    unprocessed_candles[1:],
-                                )
-                            )
-                        )
-                        if has_gap:
-                            raise ValueError(
-                                "Binance closed K-line history does not cover the "
-                                f"trailing replay gap for {canonical_symbol}"
-                            )
-                next_highest_close = state.highest_close
-                next_stop_loss = state.stop_loss
-                for candle in unprocessed_candles:
-                    next_highest_close, next_stop_loss = update_trailing_stop(
-                        state.entry_price,
-                        state.entry_atr,
-                        next_stop_loss,
-                        next_highest_close,
-                        candle.close,
+                except Exception as error:
+                    failure = TradeSignalDispatchFailure(
+                        canonical_symbol, f"{type(error).__name__}: {error}"
                     )
-                if next_stop_loss > state.stop_loss:
+                    failures.append(failure)
+                    failures_by_symbol[canonical_symbol] = failure
+                    set_scan(
+                        TradeConditionScan(
+                            KLINE_ERROR,
+                            canonical_symbol,
+                            None,
+                            None,
+                            None,
+                            None,
+                            ratio,
+                            aggregate_oi_usd=comparison.get("total_oi_usd"),
+                            error=failure.message,
+                        )
+                    )
+                    continue
+                if state.stop_loss > original_state.stop_loss:
                     LOGGER.info(
                         "Raised %s active protection from %.8f to %.8f at closed candle %s",
                         canonical_symbol,
+                        original_state.stop_loss,
                         state.stop_loss,
-                        next_stop_loss,
-                        indicators.candle_close_time,
+                        state.last_processed_candle_close_time,
                     )
-                state = replace(
-                    state,
-                    stop_loss=next_stop_loss,
-                    highest_close=next_highest_close,
-                    last_processed_candle_close_time=(
-                        state.last_processed_candle_close_time
-                        if not unprocessed_candles
-                        else unprocessed_candles[-1].close_time
-                    ),
+            else:
+                exit_indicators = indicators
+                forced_exit_reasons = (
+                    exit_reasons(
+                        candles,
+                        indicators,
+                        state.stop_loss,
+                        state.entry_price,
+                    )
+                    if state.stop_loss is not None
+                    else ()
                 )
-                store.set_trade_signal_state(canonical_symbol, state)
-            forced_exit_reasons = (
-                exit_reasons(
-                    candles,
-                    indicators,
-                    state.stop_loss,
-                    state.entry_price,
+                cooldown_candles = (
+                    dynamic_cooldown_candles(candles)
+                    if forced_exit_reasons
+                    else None
                 )
-                if state.stop_loss is not None
-                else ()
-            )
             if forced_exit_reasons:
-                cooldown_candles = dynamic_cooldown_candles(candles)
+                assert exit_indicators is not None
+                assert cooldown_candles is not None
                 LOGGER.info(
                     "Selected %s closed 15m candles for %s dynamic cooldown",
                     cooldown_candles,
@@ -556,7 +531,7 @@ def dispatch_trade_signals(
                 )
                 notifier.send_exit_long(
                     comparison,
-                    indicators,
+                    exit_indicators,
                     state,
                     forced_exit_reasons,
                     cooldown_candles,
@@ -566,7 +541,7 @@ def dispatch_trade_signals(
                     TradeSignalState(
                         status=REENTRY_COOLDOWN,
                         cooldown_until_candle_close_time=(
-                            indicators.candle_close_time
+                            exit_indicators.candle_close_time
                             + cooldown_candles
                             * FIFTEEN_MINUTES_MILLISECONDS
                         ),
@@ -578,14 +553,14 @@ def dispatch_trade_signals(
                     TradeSignalEvent(
                         event_type=EXIT_LONG,
                         canonical_symbol=canonical_symbol,
-                        candle_close_time=indicators.candle_close_time,
-                        rsi=indicators.rsi,
-                        close=indicators.close,
-                        ema200=indicators.ema200,
+                        candle_close_time=exit_indicators.candle_close_time,
+                        rsi=exit_indicators.rsi,
+                        close=exit_indicators.close,
+                        ema200=exit_indicators.ema200,
                         oi_to_market_cap=comparison["oi_to_market_cap"],
                         entry_price=state.entry_price,
                         stop_loss=state.stop_loss,
-                        atr=indicators.atr,
+                        atr=exit_indicators.atr,
                         reasons=forced_exit_reasons,
                         cooldown_candles=cooldown_candles,
                     )
@@ -593,12 +568,14 @@ def dispatch_trade_signals(
                 set_scan(
                     _state_condition_scan(
                         comparison,
-                        indicators,
+                        exit_indicators,
                         EXIT_LONG,
                         forced_exit_reasons,
                     )
                 )
                 continue
+            if state != original_state:
+                store.set_trade_signal_state(canonical_symbol, state)
             if (
                 complete
                 and ratio is not None
@@ -780,6 +757,116 @@ def dispatch_trade_signals(
     )
 
 
+def _replay_active_position(
+    canonical_symbol: str,
+    candles: list[Candle],
+    state: TradeSignalState,
+) -> tuple[
+    TradeSignalState,
+    TradeIndicators | None,
+    tuple[str, ...],
+    int | None,
+]:
+    if (
+        state.entry_price is None
+        or state.stop_loss is None
+        or state.entry_atr is None
+        or state.highest_close is None
+    ):
+        raise ValueError(f"Active trade state is incomplete for {canonical_symbol}")
+    latest_close_time = candles[-1].close_time
+    if state.last_processed_candle_close_time is None:
+        LOGGER.warning(
+            "Trailing history start is unknown for migrated state %s; continuing from candle %s",
+            canonical_symbol,
+            latest_close_time,
+        )
+        unprocessed_indexes = [len(candles) - 1]
+    else:
+        if state.last_processed_candle_close_time > latest_close_time:
+            raise ValueError(
+                "Stored trailing candle time is newer than Binance closed K-line "
+                f"for {canonical_symbol}"
+            )
+        unprocessed_indexes = [
+            index
+            for index, candle in enumerate(candles)
+            if candle.close_time > state.last_processed_candle_close_time
+        ]
+        if unprocessed_indexes:
+            first = candles[unprocessed_indexes[0]]
+            expected_first_close_time = (
+                state.last_processed_candle_close_time
+                + FIFTEEN_MINUTES_MILLISECONDS
+            )
+            has_gap = first.close_time != expected_first_close_time or any(
+                candles[current].close_time - candles[previous].close_time
+                != FIFTEEN_MINUTES_MILLISECONDS
+                for previous, current in zip(
+                    unprocessed_indexes, unprocessed_indexes[1:]
+                )
+            )
+            if has_gap:
+                raise ValueError(
+                    "Binance closed K-line history does not cover the "
+                    f"trailing replay gap for {canonical_symbol}"
+                )
+
+    replayed_state = state
+    if not unprocessed_indexes:
+        indicators = trade_indicators(candles[-REQUIRED_CLOSED_CANDLES:])
+        reasons = exit_reasons(
+            candles,
+            indicators,
+            replayed_state.stop_loss,
+            replayed_state.entry_price,
+        )
+        return (
+            replayed_state,
+            indicators if reasons else None,
+            reasons,
+            dynamic_cooldown_candles(candles) if reasons else None,
+        )
+
+    for index in unprocessed_indexes:
+        history_start = index - REQUIRED_CLOSED_CANDLES + 1
+        if history_start < 0:
+            raise ValueError(
+                "Binance closed K-line history does not provide EMA200 warmup "
+                f"for trailing replay of {canonical_symbol}"
+            )
+        history = candles[history_start : index + 1]
+        candle = candles[index]
+        next_highest_close, next_stop_loss = update_trailing_stop(
+            replayed_state.entry_price,
+            replayed_state.entry_atr,
+            replayed_state.stop_loss,
+            replayed_state.highest_close,
+            candle.close,
+        )
+        replayed_state = replace(
+            replayed_state,
+            stop_loss=next_stop_loss,
+            highest_close=next_highest_close,
+            last_processed_candle_close_time=candle.close_time,
+        )
+        indicators = trade_indicators(history)
+        reasons = exit_reasons(
+            history,
+            indicators,
+            replayed_state.stop_loss,
+            replayed_state.entry_price,
+        )
+        if reasons:
+            return (
+                replayed_state,
+                indicators,
+                reasons,
+                dynamic_cooldown_candles(history),
+            )
+    return replayed_state, None, (), None
+
+
 def scan_trade_conditions(
     snapshot: dict[str, Any],
     reference_snapshot: dict[str, Any] | None,
@@ -829,7 +916,7 @@ def _load_trade_candles(
             canonical_symbol = comparison["canonical_symbol"]
             try:
                 candles = future.result()
-                trade_indicators(candles)
+                trade_indicators(candles[-REQUIRED_CLOSED_CANDLES:])
             except Exception as error:
                 failure = TradeSignalDispatchFailure(
                     canonical_symbol,
@@ -907,6 +994,7 @@ def _scan_trade_condition(
     reference_oi: dict[str, float],
     candles: list[Candle],
 ) -> TradeConditionScan:
+    candles = candles[-REQUIRED_CLOSED_CANDLES:]
     indicators = trade_indicators(candles)
     forced_exit_reasons = exit_reasons(candles, indicators, None)
     reasons = forced_exit_reasons or (

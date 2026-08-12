@@ -24,6 +24,37 @@ from crypto_oi_monitor.sources import (
 
 
 class BinanceParserTests(unittest.TestCase):
+    def test_rejects_non_finite_binance_ticker_values(self) -> None:
+        exchange_info = {
+            "symbols": [
+                {
+                    "symbol": "ETHUSDT",
+                    "baseAsset": "ETH",
+                    "contractType": "PERPETUAL",
+                    "quoteAsset": "USDT",
+                    "status": "TRADING",
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(ValueError, "quote volume must be finite"):
+            parse_binance_universe(
+                exchange_info,
+                [{"symbol": "ETHUSDT", "quoteVolume": "NaN", "lastPrice": "1"}],
+            )
+
+        with self.assertRaisesRegex(ValueError, "last price must be finite"):
+            parse_binance_universe(
+                exchange_info,
+                [
+                    {
+                        "symbol": "ETHUSDT",
+                        "quoteVolume": "10000000",
+                        "lastPrice": "NaN",
+                    }
+                ],
+            )
+
     def test_builds_universe_from_usdt_perpetual_and_ten_million_turnover(self) -> None:
         universe = parse_binance_universe(
             {
@@ -76,8 +107,16 @@ class VenueParserTests(unittest.TestCase):
 
     def test_reads_okx_usd_oi_directly(self) -> None:
         result = parse_okx_open_interest(
-            {"data": [{"instId": "ETH-USDT-SWAP", "oiUsd": "120000"}]}, {"ETH"}
+            {
+                "data": [
+                    {"instId": "ETH-USDT-SWAP", "oiUsd": "120000"},
+                    {"instId": "ETH-USD-SWAP", "oiUsd": "90000"},
+                ]
+            },
+            {"ETH"},
         )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].symbol, "ETH-USDT-SWAP")
         self.assertEqual(result[0].oi_usd, 120_000)
 
     def test_reads_bybit_open_interest_value_directly(self) -> None:

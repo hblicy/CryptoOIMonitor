@@ -36,6 +36,19 @@ def _warm_candles(closes: list[float], warmup_close: float = 100) -> list[Candle
 
 
 class TradeSetupTests(unittest.TestCase):
+    def test_rejects_invalid_candle_numbers(self) -> None:
+        invalid_candles = (
+            (float("nan"), 99, 100, 10),
+            (101, 99, 0, 10),
+            (101, 99, 102, 10),
+            (101, 99, 100, -1),
+        )
+        for high, low, close, quote_volume in invalid_candles:
+            with self.subTest(
+                high=high, low=low, close=close, quote_volume=quote_volume
+            ):
+                with self.assertRaises(ValueError):
+                    Candle(1, high, low, close, quote_volume)
     def test_raises_trailing_stop_only_after_three_entry_atr_profit(self) -> None:
         self.assertEqual(
             update_trailing_stop(100, 2, 96, 100, 105),
@@ -149,7 +162,7 @@ class TradeSetupTests(unittest.TestCase):
 
         self.assertEqual(stop_long_reasons(indicators), ("close_not_above_ema200",))
 
-    def test_fetches_1002_candles_and_discards_unclosed_binance_candle(self) -> None:
+    def test_fetches_1500_candles_and_discards_unclosed_binance_candle(self) -> None:
         class FakeClient:
             def __init__(self) -> None:
                 self.calls = []
@@ -158,21 +171,21 @@ class TradeSetupTests(unittest.TestCase):
                 self.calls.append((url, params))
                 return [
                     [index, "0", "12", "8", "10", "0", index + 1, "250"]
-                    for index in range(1002)
+                    for index in range(1500)
                 ]
 
         client = FakeClient()
         candles = fetch_binance_closed_candles(client, "PEPEUSDT")
 
-        self.assertEqual(len(candles), 1001)
+        self.assertEqual(len(candles), 1499)
         self.assertEqual(candles[0], Candle(1, 12, 8, 10, 250))
-        self.assertEqual(candles[-1], Candle(1001, 12, 8, 10, 250))
+        self.assertEqual(candles[-1], Candle(1499, 12, 8, 10, 250))
         self.assertEqual(
             client.calls,
             [
                 (
                     BINANCE_KLINES_URL,
-                    {"symbol": "PEPEUSDT", "interval": "15m", "limit": "1002"},
+                    {"symbol": "PEPEUSDT", "interval": "15m", "limit": "1500"},
                 )
             ],
         )

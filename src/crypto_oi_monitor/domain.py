@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 
 BINANCE_MIN_TURNOVER_USD = 10_000_000
@@ -18,6 +19,10 @@ class ContractOpenInterest:
     symbol: str
     oi_usd: float
     canonical_symbol: str | None = None
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.oi_usd) or self.oi_usd < 0:
+            raise ValueError("Contract OI must be finite non-negative")
 
 
 @dataclass(frozen=True)
@@ -51,7 +56,13 @@ def aggregate_asset(
     contracts: tuple[ContractOpenInterest, ...],
 ) -> AssetComparison:
     total_oi_usd = sum(contract.oi_usd for contract in contracts)
+    if not math.isfinite(total_oi_usd):
+        raise ValueError("Aggregate OI must be finite")
+    if not math.isfinite(market_cap_usd) or market_cap_usd <= 0:
+        raise ValueError("Market cap must be finite positive")
     oi_to_market_cap = total_oi_usd / market_cap_usd
+    if not math.isfinite(oi_to_market_cap):
+        raise ValueError("OI to market cap ratio must be finite")
     return AssetComparison(
         canonical_symbol=canonical_symbol,
         market_cap_id=market_cap_id,

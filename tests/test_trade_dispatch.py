@@ -218,6 +218,13 @@ class FailingTradeSignalNotifier(RecordingNotifier):
         raise RuntimeError("WeCom failed")
 
 
+class FailingExitNotifier(RecordingNotifier):
+    def send_exit_long(
+        self, comparison, indicators, state, reasons, cooldown_candles
+    ) -> None:
+        raise RuntimeError("WeCom exit failed")
+
+
 class ConditionListStore:
     def __init__(self, state) -> None:
         self.state = state
@@ -525,20 +532,31 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.scans[0].status, EXIT_LONG)
         self.assertIn("trailing_take_profit", result.scans[0].reasons)
 
-    def test_rejects_trailing_replay_when_binance_history_has_a_gap(self) -> None:
+    def test_replays_every_unprocessed_close_and_exits_on_an_intermediate_breach(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()
         candles = _long_setup_candles()
+        last_processed = candles[-1].close_time
         store.states["PEPE"] = TradeSignalState(
             status="long",
             entry_price=100,
             stop_loss=96,
             entry_atr=2,
             highest_close=100,
-            last_processed_candle_close_time=(
-                candles[0].close_time - 2 * FIFTEEN_MINUTES_MILLISECONDS
-            ),
+            last_processed_candle_close_time=last_processed,
+            binance_symbol="PEPEUSDT",
         )
+        for close in (108, 100, 106):
+            previous = candles[-1]
+            candles.append(
+                Candle(
+                    close_time=previous.close_time + FIFTEEN_MINUTES_MILLISECONDS,
+                    high=close + 1,
+                    low=close - 1,
+                    close=close,
+                    quote_volume=200,
+                )
+            )
         snapshot = {
             "complete": True,
             "comparisons": [
@@ -551,8 +569,105 @@ class TradeDispatchTests(unittest.TestCase):
             ],
         }
 
-        with self.assertRaisesRegex(ValueError, "does not cover the trailing replay gap"):
-            dispatch_trade_signals(snapshot, lambda _: candles, store, notifier)
+        result = dispatch_trade_signals(snapshot, lambda _: candles, store, notifier)
+
+        self.assertEqual(result.events, (EXIT_LONG,))
+        self.assertEqual(notifier.exit_longs[0][1], 100)
+        self.assertEqual(notifier.exit_longs[0][2], 104)
+        self.assertEqual(result.details[0].candle_close_time, candles[-2].close_time)
+        self.assertEqual(store.states["PEPE"].status, REENTRY_COOLDOWN)
+
+    def test_does_not_advance_replay_state_when_historical_exit_notification_fails(self) -> None:
+        store = MemoryStore()
+        candles = _long_setup_candles()
+        original = TradeSignalState(
+            status="long",
+            entry_price=100,
+            stop_loss=96,
+            entry_atr=2,
+            highest_close=100,
+            last_processed_candle_close_time=candles[-1].close_time,
+            binance_symbol="PEPEUSDT",
+        )
+        store.states["PEPE"] = original
+        for close in (108, 100, 106):
+            previous = candles[-1]
+            candles.append(
+                Candle(
+                    close_time=previous.close_time + FIFTEEN_MINUTES_MILLISECONDS,
+                    high=close + 1,
+                    low=close - 1,
+                    close=close,
+                    quote_volume=200,
+                )
+            )
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "WeCom exit failed"):
+            dispatch_trade_signals(snapshot, lambda _: candles, store, FailingExitNotifier())
+
+        self.assertEqual(store.states["PEPE"], original)
+
+    def test_records_trailing_replay_gap_and_continues_other_symbols(self) -> None:
+        store = MemoryStore()
+        notifier = RecordingNotifier()
+        candles = _long_setup_candles()
+        store.states["PEPE"] = TradeSignalState(
+            status="long",
+            entry_price=100,
+            stop_loss=96,
+            entry_atr=2,
+            highest_close=100,
+            last_processed_candle_close_time=(
+                candles[0].close_time - 2 * FIFTEEN_MINUTES_MILLISECONDS
+            ),
+            binance_symbol="PEPEUSDT",
+        )
+        store.states["DOGE"] = TradeSignalState(
+            status="long",
+            entry_price=110,
+            stop_loss=101,
+            entry_atr=2,
+            highest_close=110,
+            last_processed_candle_close_time=candles[-1].close_time,
+            binance_symbol="DOGEUSDT",
+        )
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                },
+                {
+                    "canonical_symbol": "DOGE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "DOGEUSDT"}],
+                }
+            ],
+        }
+
+        result = dispatch_trade_signals(snapshot, lambda _: candles, store, notifier)
+
+        self.assertEqual(result.events, (EXIT_LONG,))
+        self.assertEqual(result.failures[0].canonical_symbol, "PEPE")
+        self.assertIn("does not cover the trailing replay gap", result.failures[0].message)
+        self.assertEqual(notifier.exit_longs[0][0], "DOGE")
+        self.assertEqual(store.states["PEPE"].status, "long")
+        self.assertEqual(store.states["DOGE"].status, REENTRY_COOLDOWN)
 
     def test_expired_cooldown_still_requires_a_new_ema200_cross(self) -> None:
         store = MemoryStore()
@@ -794,7 +909,7 @@ class TradeDispatchTests(unittest.TestCase):
 
         self.assertIs(store.state, previous_state)
 
-    def test_sends_one_long_signal_until_rsi_reaches_60(self) -> None:
+    def test_exits_if_protection_is_breached_after_rsi_stops_additions(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()
         snapshot = {
@@ -830,11 +945,12 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(stopped.events, ("stop_long",))
         self.assertEqual(stopped.details[0].event_type, "stop_long")
         self.assertEqual(stopped.details[0].reasons, ("rsi_not_below_60",))
-        self.assertEqual(reentered.events, (RESUME_LONG,))
-        self.assertEqual(reentered.details[0].event_type, RESUME_LONG)
+        self.assertEqual(reentered.events, (EXIT_LONG,))
+        self.assertEqual(reentered.details[0].event_type, EXIT_LONG)
+        self.assertIn("close_below_ema200_exit_buffer", reentered.details[0].reasons)
         self.assertEqual(
             notifier.signals,
-            [("long", "PEPE", 90), (RESUME_LONG, "PEPE", 90)],
+            [("long", "PEPE", 90)],
         )
         self.assertEqual(notifier.stop_longs[0][0], "PEPE")
         self.assertGreater(notifier.stop_longs[0][1].rsi, 60)

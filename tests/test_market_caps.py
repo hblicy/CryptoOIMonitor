@@ -5,6 +5,8 @@ from crypto_oi_monitor.market_caps import (
     CMC_ID_MAP_URL,
     CMC_QUOTES_URL,
     CachedMarketCapLoader,
+    MarketCap,
+    MarketCapCandidate,
     fetch_market_caps,
     parse_cmc_id_overrides,
     parse_market_caps,
@@ -221,6 +223,53 @@ class CoinMarketCapMarketCapTests(unittest.TestCase):
             [CMC_ID_MAP_URL, CMC_QUOTES_URL, CMC_QUOTES_URL],
         )
         self.assertIsNotNone(getattr(refreshed, "refreshed_at", None))
+
+    def test_does_not_refresh_quotes_early_when_the_asset_pool_changes(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def get_json(self, url: str, params: dict[str, str]):
+                self.calls.append((url, params))
+                if url == CMC_ID_MAP_URL:
+                    return {
+                        "data": [
+                            {"id": index + 1, "symbol": symbol}
+                            for index, symbol in enumerate(params["symbol"].split(","))
+                        ]
+                    }
+                return {
+                    "data": [
+                        {
+                            "id": int(market_cap_id),
+                            "symbol": "ETH",
+                            "quote": {"USD": {"market_cap": 300}},
+                        }
+                        for market_cap_id in params["id"].split(",")
+                    ]
+                }
+
+        now = 0.0
+        client = FakeClient()
+        loader = CachedMarketCapLoader(client, refresh_seconds=600, clock=lambda: now)
+
+        first = loader({"ETH"})
+        now = 120.0
+        changed = loader({"ETH", "NEW"})
+
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(changed.market_caps, first.market_caps)
+        self.assertEqual(changed.unmapped_assets, ("NEW",))
+
+    def test_rejects_non_finite_market_cap(self) -> None:
+        with self.assertRaisesRegex(ValueError, "finite positive"):
+            MarketCap("1", float("nan"))
+
+    def test_rejects_non_finite_candidate_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "candidate values must be finite"):
+            MarketCapCandidate(
+                "AAA", "1", "AAA", "aaa", float("nan"), 100, 1, None
+            )
 
     def test_retries_unmapped_assets_after_one_hour(self) -> None:
         class FakeClient:

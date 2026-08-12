@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from statistics import median
 from typing import Any, Protocol
 
@@ -10,6 +11,7 @@ ATR_PERIOD = 14
 EMA_PERIOD = 200
 EMA_WARMUP_CANDLES = 1000
 REQUIRED_CLOSED_CANDLES = EMA_WARMUP_CANDLES + 1
+BINANCE_KLINE_FETCH_LIMIT = 1500
 FIFTEEN_MINUTES_MILLISECONDS = 15 * 60 * 1000
 EMA_SLOPE_LOOKBACK = 5
 VOLUME_AVERAGE_PERIOD = 20
@@ -35,6 +37,17 @@ class Candle:
     low: float
     close: float
     quote_volume: float
+
+    def __post_init__(self) -> None:
+        prices = (self.high, self.low, self.close)
+        if not all(math.isfinite(value) and value > 0 for value in prices):
+            raise ValueError("Candle prices must be finite positive")
+        if self.high < self.low:
+            raise ValueError("Candle high must not be below low")
+        if not self.low <= self.close <= self.high:
+            raise ValueError("Candle close must be within the high-low range")
+        if not math.isfinite(self.quote_volume) or self.quote_volume < 0:
+            raise ValueError("Candle quote volume must be finite non-negative")
 
 
 @dataclass(frozen=True)
@@ -79,7 +92,7 @@ def fetch_binance_closed_candles(
         {
             "symbol": symbol,
             "interval": "15m",
-            "limit": str(REQUIRED_CLOSED_CANDLES + 1),
+            "limit": str(BINANCE_KLINE_FETCH_LIMIT),
         },
     )
     candles = [

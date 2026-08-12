@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import math
 from time import sleep
 from typing import Any, Protocol
 
@@ -13,6 +14,12 @@ class BinanceInstrument:
     canonical_symbol: str
     symbol: str
     last_price: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.last_price is not None and (
+            not math.isfinite(self.last_price) or self.last_price <= 0
+        ):
+            raise ValueError("Binance last price must be finite positive")
 
 
 class PublicHttpClient(Protocol):
@@ -71,6 +78,10 @@ def parse_binance_universe(
             continue
         ticker = tickers_by_symbol.get(instrument["symbol"])
         turnover = None if ticker is None else float(ticker["quoteVolume"])
+        if turnover is not None and (
+            not math.isfinite(turnover) or turnover < 0
+        ):
+            raise ValueError("Binance quote volume must be finite non-negative")
         if ticker is None or not is_binance_universe_member(
             instrument["contractType"], turnover
         ):
@@ -152,10 +163,13 @@ def parse_okx_open_interest(
 ) -> list[ContractOpenInterest]:
     contracts: list[ContractOpenInterest] = []
     for item in payload["data"]:
-        canonical = canonical_symbol(item["instId"].split("-")[0])
+        instrument_id = item["instId"]
+        if not instrument_id.endswith("-USDT-SWAP"):
+            continue
+        canonical = canonical_symbol(instrument_id.split("-")[0])
         if canonical in selected_assets:
             contracts.append(
-                ContractOpenInterest("OKX", item["instId"], float(item["oiUsd"]), canonical)
+                ContractOpenInterest("OKX", instrument_id, float(item["oiUsd"]), canonical)
             )
     return contracts
 

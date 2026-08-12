@@ -6,6 +6,7 @@ ENV_FILE="${ENV_FILE:-$ROOT/.env}"
 STATE_DIR="$ROOT/data"
 PID_FILE="$STATE_DIR/monitor.pid"
 LOG_FILE="$STATE_DIR/monitor.log"
+STARTUP_LOG_FILE="$STATE_DIR/startup.log"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "配置文件不存在：$ENV_FILE。请从 .env.example 复制为 .env 并填写配置。" >&2
@@ -46,15 +47,25 @@ if [[ -f "$PID_FILE" ]]; then
   rm -f "$PID_FILE"
 fi
 
-nohup python3 "$ROOT/app.py" --host "$HOST" --port "$PORT" >> "$LOG_FILE" 2>&1 &
+nohup python3 "$ROOT/app.py" \
+  --host "$HOST" \
+  --port "$PORT" \
+  --log-file "$LOG_FILE" \
+  --log-max-mb "${LOG_MAX_MB:-50}" \
+  --log-backup-count "${LOG_BACKUP_COUNT:-5}" \
+  >"$STARTUP_LOG_FILE" 2>&1 &
 pid="$!"
 printf '%s\n' "$pid" > "$PID_FILE"
 
 sleep 1
 if ! kill -0 "$pid" 2>/dev/null; then
   rm -f "$PID_FILE"
-  echo "服务启动失败，最近日志：" >&2
-  tail -n 40 "$LOG_FILE" >&2
+  echo "服务启动失败，启动输出：" >&2
+  tail -n 40 "$STARTUP_LOG_FILE" >&2
+  if [[ -f "$LOG_FILE" ]]; then
+    echo "最近应用日志：" >&2
+    tail -n 40 "$LOG_FILE" >&2
+  fi
   exit 1
 fi
 

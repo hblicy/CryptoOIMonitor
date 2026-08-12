@@ -155,7 +155,10 @@ class SnapshotStore:
             with connection:
                 connection.execute(
                     "INSERT INTO snapshots (captured_at, payload) VALUES (?, ?)",
-                    (snapshot["captured_at"], json.dumps(snapshot, separators=(",", ":"))),
+                    (
+                        snapshot["captured_at"],
+                        json.dumps(snapshot, separators=(",", ":"), allow_nan=False),
+                    ),
                 )
                 removed = self._remove_expired_snapshots(
                     connection, str(snapshot["captured_at"])
