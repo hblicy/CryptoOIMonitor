@@ -882,7 +882,39 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(blocked.events, ())
         self.assertEqual(expired.events, ())
         self.assertEqual(notifier.signals, [])
-        self.assertIsNone(store.get_trade_signal_state("PEPE"))
+        self.assertEqual(
+            store.get_trade_signal_state("PEPE").status,
+            REENTRY_COOLDOWN,
+        )
+        self.assertEqual(
+            expired.scans[0].reasons,
+            ("ema200_breakout_before_cooldown_end",),
+        )
+
+    def test_expired_cooldown_accepts_a_breakout_at_cooldown_end(self) -> None:
+        store = MemoryStore()
+        notifier = RecordingNotifier()
+        candles = _long_setup_candles()
+        store.states["PEPE"] = TradeSignalState(
+            status=REENTRY_COOLDOWN,
+            cooldown_until_candle_close_time=candles[-1].close_time,
+        )
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 1.2,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        result = dispatch_trade_signals(snapshot, lambda _: candles, store, notifier)
+
+        self.assertEqual(result.events, (RESUME_LONG,))
+        self.assertEqual(store.get_trade_signal_state("PEPE").status, "long")
 
     def test_active_cooldown_is_not_reported_as_can_long(self) -> None:
         store = MemoryStore()
@@ -1229,6 +1261,7 @@ class TradeDispatchTests(unittest.TestCase):
             quote_volume=121,
             previous_quote_volume=100,
             average_quote_volume=100,
+            ema200_breakout_candles_ago=0,
         )
 
         reasons = _aggregate_oi_entry_reasons(
@@ -1427,7 +1460,6 @@ class TradeDispatchTests(unittest.TestCase):
                     "stop_long",
                     (
                         "ema200_not_crossed_up",
-                        "quote_volume_not_increasing",
                         "quote_volume_not_above_average",
                         "rsi_not_below_60",
                     ),

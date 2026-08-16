@@ -578,6 +578,7 @@ def dispatch_trade_signals(
             continue
         candles = replay_candles[-REQUIRED_CLOSED_CANDLES:]
         indicators = trade_indicators(candles)
+        cooldown_entry_floor: int | None = None
         if state is not None and state.status == REENTRY_COOLDOWN:
             if (
                 state.cooldown_until_candle_close_time is not None
@@ -593,12 +594,7 @@ def dispatch_trade_signals(
                     )
                 )
                 continue
-            try:
-                store.clear_trade_signal_state(canonical_symbol)
-            except Exception as error:
-                record_candidate_failure(canonical_symbol, error)
-                continue
-            state = None
+            cooldown_entry_floor = state.cooldown_until_candle_close_time
         if state is not None:
             original_state = state
             if state.binance_symbol != binance_symbol:
@@ -917,6 +913,15 @@ def dispatch_trade_signals(
                 comparison, reference_oi, indicators
             )
             entry_blockers += entry_reasons(indicators)
+            if (
+                cooldown_entry_floor is not None
+                and indicators.ema200_breakout_candles_ago is not None
+                and indicators.candle_close_time
+                - indicators.ema200_breakout_candles_ago
+                * FIFTEEN_MINUTES_MILLISECONDS
+                < cooldown_entry_floor
+            ):
+                entry_blockers += ("ema200_breakout_before_cooldown_end",)
             if entry_blockers:
                 set_scan(
                     _state_condition_scan(

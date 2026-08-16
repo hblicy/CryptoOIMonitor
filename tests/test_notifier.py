@@ -29,6 +29,7 @@ def _indicators(rsi: float = 45, close: float = 101, ema200: float = 100) -> Tra
         quote_volume=120,
         previous_quote_volume=100,
         average_quote_volume=90,
+        ema200_breakout_candles_ago=0,
     )
 
 
@@ -156,6 +157,9 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertIn("止损：240.00000000", content)
         self.assertIn("做多条件", content)
         self.assertIn("OI / 市值 > 90%", content)
+        self.assertIn("最近3根已收盘15m K线内上穿 EMA200", content)
+        self.assertIn("前20根均量的1.1倍", content)
+        self.assertNotIn("成交额较上一根增加", content)
         self.assertIn("5根前 EMA200：228.00000000", content)
         self.assertIn("前20根15m平均成交额：900,000.00 USD", content)
         self.assertIn("15分钟前聚合 OI：110.00 USD", content)

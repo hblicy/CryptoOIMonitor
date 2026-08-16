@@ -14,8 +14,9 @@ REQUIRED_CLOSED_CANDLES = EMA_WARMUP_CANDLES + 1
 BINANCE_KLINE_FETCH_LIMIT = 1500
 FIFTEEN_MINUTES_MILLISECONDS = 15 * 60 * 1000
 EMA_SLOPE_LOOKBACK = 5
+EMA_BREAKOUT_LOOKBACK = 3
 VOLUME_AVERAGE_PERIOD = 20
-VOLUME_BREAKOUT_MULTIPLIER = 1.2
+VOLUME_BREAKOUT_MULTIPLIER = 1.1
 ENTRY_RSI_MAX = 60
 EXIT_EMA_ATR_BUFFER = 0.5
 TRAILING_ACTIVATION_ATR = 3
@@ -82,6 +83,7 @@ class TradeIndicators:
     quote_volume: float
     previous_quote_volume: float
     average_quote_volume: float
+    ema200_breakout_candles_ago: int | None
 
 
 def fetch_binance_closed_candles(
@@ -146,6 +148,18 @@ def trade_indicators(candles: list[Candle]) -> TradeIndicators:
     ema200_values = _ema_values(closes, EMA_PERIOD)
     previous_ema200, ema200 = ema200_values[-2:]
     ema200_slope_reference = ema200_values[-(EMA_SLOPE_LOOKBACK + 1)]
+    aligned_closes = closes[EMA_PERIOD - 1 :]
+    ema200_breakout_candles_ago = next(
+        (
+            candles_ago
+            for candles_ago in range(EMA_BREAKOUT_LOOKBACK)
+            if aligned_closes[-(candles_ago + 2)]
+            <= ema200_values[-(candles_ago + 2)]
+            and aligned_closes[-(candles_ago + 1)]
+            > ema200_values[-(candles_ago + 1)]
+        ),
+        None,
+    )
     atr = _atr(candles, ATR_PERIOD)
     previous = candles[-2]
     current = candles[-1]
@@ -163,20 +177,19 @@ def trade_indicators(candles: list[Candle]) -> TradeIndicators:
         previous.quote_volume,
         sum(candle.quote_volume for candle in candles[-(VOLUME_AVERAGE_PERIOD + 1) : -1])
         / VOLUME_AVERAGE_PERIOD,
+        ema200_breakout_candles_ago,
     )
 
 
 def entry_reasons(indicators: TradeIndicators) -> tuple[str, ...]:
     reasons = []
-    if not (
-        indicators.previous_close <= indicators.previous_ema200
-        and indicators.close > indicators.ema200
+    if (
+        indicators.ema200_breakout_candles_ago is None
+        or indicators.close <= indicators.ema200
     ):
         reasons.append("ema200_not_crossed_up")
     if indicators.ema200 <= indicators.ema200_slope_reference:
         reasons.append("ema200_not_rising")
-    if indicators.quote_volume <= indicators.previous_quote_volume:
-        reasons.append("quote_volume_not_increasing")
     if (
         indicators.quote_volume
         <= VOLUME_BREAKOUT_MULTIPLIER * indicators.average_quote_volume

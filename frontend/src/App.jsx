@@ -45,10 +45,11 @@ export function tradeSignalReason(reason) {
   if (reason === "close_below_ema200_exit_buffer") return "15m 收盘价低于 EMA200 − 0.5 × ATR";
   if (reason === "two_closes_below_ema200") return "连续两根 15m 收盘价低于 EMA200";
   if (reason === "trailing_take_profit") return "触及移动止盈保护价";
-  if (reason === "ema200_not_crossed_up") return "15m 收盘价未首次上穿 EMA200";
+  if (reason === "ema200_not_crossed_up") return "最近3根已收盘15m K线内未上穿 EMA200，或当前已回到 EMA200 下方";
+  if (reason === "ema200_breakout_before_cooldown_end") return "EMA200 突破发生在冷却结束前";
   if (reason === "ema200_not_rising") return "EMA200 未向上倾斜";
   if (reason === "quote_volume_not_increasing") return "15m USDT 成交额未较上一根增加";
-  if (reason === "quote_volume_not_above_average") return "15m 成交额未突破前20根均量的1.2倍";
+  if (reason === "quote_volume_not_above_average") return "15m 成交额未突破前20根均量的1.1倍";
   if (reason === "aggregate_oi_history_unavailable") return "缺少15分钟前聚合 OI";
   if (reason === "aggregate_oi_not_increasing_after_price_adjustment") return "价格校正后的聚合 OI 未较15分钟前增加";
   if (reason === "close_not_above_ema200") return "15m 收盘价未高于 EMA200";
@@ -318,7 +319,7 @@ export function TradeConditionPanel({ scans, complete }) {
     <section className="trade-signal-panel" aria-label="交易条件扫描">
       <header className="trade-signal-heading">
         <strong>交易条件扫描</strong>
-        <span>OI / 市值 &gt; 90%；15m 首次上穿 EMA200 且 EMA200 向上；价格校正 OI 增长；成交额突破前20根均量的1.2倍；RSI &lt; 60 且回升</span>
+        <span>OI / 市值 &gt; 90%；最近3根内上穿 EMA200、当前仍在其上方且 EMA200 向上；价格校正 OI 增长；成交额突破前20根均量的1.1倍；RSI &lt; 60 且回升</span>
       </header>
       {!complete && <p className="trade-signal-empty">数据源不完整：已暂停新开仓，已有交易状态的 15m 风控仍在执行。</p>}
       {!scans.length
@@ -370,11 +371,11 @@ function TradeConditionCard({ scan }) {
           </dl>
           {scan.status === "can_long"
             ? <p className="trade-signal-note">
-              满足首次上穿 EMA200、EMA200 向上、RSI 回升、价格校正 OI 增长及成交额突破均量条件；
+              满足最近3根内上穿 EMA200、当前仍在其上方、EMA200 向上、RSI 回升、价格校正 OI 增长及成交额突破均量条件；
               聚合 OI {formatUsd(scan.previous_aggregate_oi_usd)} → {formatUsd(scan.aggregate_oi_usd)}；
               价格校正 OI 指数 {formatTradePrice(scan.previous_adjusted_aggregate_oi)} → {formatTradePrice(scan.adjusted_aggregate_oi)}；
-              15m成交额 {formatUsd(scan.previous_quote_volume)} → {formatUsd(scan.quote_volume)}，
-              前20根均量 {formatUsd(scan.average_quote_volume)}；5根前 EMA200 {formatTradePrice(scan.ema200_slope_reference)}。
+              15m成交额 {formatUsd(scan.quote_volume)}，前20根均量 {formatUsd(scan.average_quote_volume)}；
+              5根前 EMA200 {formatTradePrice(scan.ema200_slope_reference)}。
             </p>
             : <p className="trade-signal-note">{scan.status === "exit_long" ? "必须退出原因" : "停止原因"}：{reasons}。</p>}
         </>}

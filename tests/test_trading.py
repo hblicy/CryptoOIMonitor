@@ -86,6 +86,7 @@ class TradeSetupTests(unittest.TestCase):
             "quote_volume": 120,
             "previous_quote_volume": 100,
             "average_quote_volume": 90,
+            "ema200_breakout_candles_ago": 0,
         }
         values.update(changes)
         return TradeIndicators(**values)
@@ -95,18 +96,29 @@ class TradeSetupTests(unittest.TestCase):
 
         self.assertEqual(entry_reasons(indicators), ("rsi_not_rising",))
 
-    def test_requires_fresh_close_crossover_above_ema200(self) -> None:
-        indicators = self._valid_indicators(previous_close=101)
+    def test_does_not_require_current_quote_volume_to_exceed_previous_candle(
+        self,
+    ) -> None:
+        indicators = self._valid_indicators(
+            quote_volume=111,
+            previous_quote_volume=200,
+            average_quote_volume=100,
+        )
+
+        self.assertEqual(entry_reasons(indicators), ())
+
+    def test_requires_ema200_crossover_within_three_closed_candles(self) -> None:
+        indicators = self._valid_indicators(ema200_breakout_candles_ago=None)
 
         self.assertEqual(entry_reasons(indicators), ("ema200_not_crossed_up",))
 
-    def test_requires_current_quote_volume_to_exceed_previous_candle(self) -> None:
+    def test_requires_current_close_to_remain_above_ema200(self) -> None:
         indicators = self._valid_indicators(
-            quote_volume=100,
-            average_quote_volume=50,
+            close=99,
+            ema200_breakout_candles_ago=1,
         )
 
-        self.assertEqual(entry_reasons(indicators), ("quote_volume_not_increasing",))
+        self.assertEqual(entry_reasons(indicators), ("ema200_not_crossed_up",))
 
     def test_requires_ema200_to_rise_over_five_closed_candles(self) -> None:
         indicators = self._valid_indicators(ema200_slope_reference=100)
@@ -115,7 +127,7 @@ class TradeSetupTests(unittest.TestCase):
 
     def test_requires_quote_volume_to_break_twenty_candle_average(self) -> None:
         indicators = self._valid_indicators(
-            quote_volume=120,
+            quote_volume=110,
             previous_quote_volume=100,
             average_quote_volume=100,
         )
@@ -124,6 +136,29 @@ class TradeSetupTests(unittest.TestCase):
             entry_reasons(indicators),
             ("quote_volume_not_above_average",),
         )
+
+    def test_accepts_ema200_breakout_from_two_closed_candles_ago(self) -> None:
+        closes = (
+            [100] * 950
+            + [100 + (index % 2) * 2 for index in range(45)]
+            + [97, 98, 102, 102, 100, 100.5, 100.7, 100.9]
+        )
+        candles = _candles(closes, [100] * (len(closes) - 1) + [111])
+
+        signal = evaluate_trade_setup(candles)
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.entry_price, 100.9)
+
+    def test_rejects_ema200_breakout_older_than_three_closed_candles(self) -> None:
+        closes = (
+            [100] * 950
+            + [100 + (index % 2) * 2 for index in range(45)]
+            + [97, 98, 102, 102, 100, 100.5, 100.7, 100.8, 100.9]
+        )
+        candles = _candles(closes, [100] * (len(closes) - 1) + [111])
+
+        self.assertIsNone(evaluate_trade_setup(candles))
 
     def test_accepts_low_rsi_but_rejects_rsi_at_sixty(self) -> None:
         self.assertEqual(

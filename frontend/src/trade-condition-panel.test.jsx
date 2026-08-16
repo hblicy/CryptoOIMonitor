@@ -5,6 +5,16 @@ import { describe, expect, it } from "vitest";
 import { TradeConditionPanel } from "./App";
 
 describe("TradeConditionPanel", () => {
+  it("describes the relaxed three-candle breakout and volume rules", () => {
+    const html = renderToStaticMarkup(
+      <TradeConditionPanel complete={true} scans={[]} />,
+    );
+
+    expect(html).toContain("最近3根内上穿 EMA200");
+    expect(html).toContain("前20根均量的1.1倍");
+    expect(html).not.toContain("价格校正 OI 增长；成交额突破前20根均量的1.2倍");
+  });
+
   it("shows active risk results while new entries are paused", () => {
     const html = renderToStaticMarkup(
       <TradeConditionPanel

@@ -41,10 +41,11 @@ describe("data source groups", () => {
     expect(tradeSignalReason("oi_to_market_cap_not_above_90")).toBe("OI / 市值未高于 90%");
     expect(tradeSignalReason("aggregate_oi_history_unavailable")).toBe("缺少15分钟前聚合 OI");
     expect(tradeSignalReason("aggregate_oi_not_increasing_after_price_adjustment")).toBe("价格校正后的聚合 OI 未较15分钟前增加");
-    expect(tradeSignalReason("ema200_not_crossed_up")).toBe("15m 收盘价未首次上穿 EMA200");
+    expect(tradeSignalReason("ema200_not_crossed_up")).toBe("最近3根已收盘15m K线内未上穿 EMA200，或当前已回到 EMA200 下方");
+    expect(tradeSignalReason("ema200_breakout_before_cooldown_end")).toBe("EMA200 突破发生在冷却结束前");
     expect(tradeSignalReason("ema200_not_rising")).toBe("EMA200 未向上倾斜");
     expect(tradeSignalReason("quote_volume_not_increasing")).toBe("15m USDT 成交额未较上一根增加");
-    expect(tradeSignalReason("quote_volume_not_above_average")).toBe("15m 成交额未突破前20根均量的1.2倍");
+    expect(tradeSignalReason("quote_volume_not_above_average")).toBe("15m 成交额未突破前20根均量的1.1倍");
     expect(tradeSignalReason("rsi_not_below_60")).toBe("RSI(14) 未低于 60");
     expect(tradeSignalReason("close_below_ema200")).toBe("15m 收盘价低于 EMA200");
   });
