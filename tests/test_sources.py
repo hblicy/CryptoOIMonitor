@@ -55,7 +55,7 @@ class BinanceParserTests(unittest.TestCase):
                 ],
             )
 
-    def test_builds_universe_from_usdt_perpetual_and_ten_million_turnover(self) -> None:
+    def test_builds_universe_from_usdt_perpetual_and_five_million_turnover(self) -> None:
         universe = parse_binance_universe(
             {
                 "symbols": [
@@ -83,8 +83,8 @@ class BinanceParserTests(unittest.TestCase):
                 ]
             },
             [
-                {"symbol": "ETHUSDT", "quoteVolume": "10000000", "lastPrice": "3000"},
-                {"symbol": "LOWUSDT", "quoteVolume": "9999999.99"},
+                {"symbol": "ETHUSDT", "quoteVolume": "5000000", "lastPrice": "3000"},
+                {"symbol": "LOWUSDT", "quoteVolume": "4999999.99"},
                 {"symbol": "BTCUSDT_260925", "quoteVolume": "999999999"},
             ],
         )
