@@ -1144,7 +1144,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(len(notifier.lists), 1)
         self.assertEqual(store.state.can_long, ("AKE", "BULLA"))
 
-    def test_exits_if_protection_is_breached_after_rsi_stops_additions(self) -> None:
+    def test_exits_if_protection_is_breached_after_high_rsi_continues_long(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()
         snapshot = {
@@ -1177,9 +1177,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(first.details[0].candle_close_time, 900_899_999)
         self.assertEqual(first.details[0].reasons, ())
         self.assertEqual(repeated.events, ())
-        self.assertEqual(stopped.events, ("stop_long",))
-        self.assertEqual(stopped.details[0].event_type, "stop_long")
-        self.assertEqual(stopped.details[0].reasons, ("rsi_not_below_60",))
+        self.assertEqual(stopped.events, ())
         self.assertEqual(reentered.events, (EXIT_LONG,))
         self.assertEqual(reentered.details[0].event_type, EXIT_LONG)
         self.assertIn("close_below_ema200_exit_buffer", reentered.details[0].reasons)
@@ -1187,8 +1185,7 @@ class TradeDispatchTests(unittest.TestCase):
             notifier.signals,
             [("long", "PEPE", 90)],
         )
-        self.assertEqual(notifier.stop_longs[0][0], "PEPE")
-        self.assertGreater(notifier.stop_longs[0][1].rsi, 60)
+        self.assertEqual(notifier.stop_longs, [])
 
     def test_failed_resume_notification_keeps_no_add_state(self) -> None:
         store = MemoryStore()
@@ -1461,7 +1458,6 @@ class TradeDispatchTests(unittest.TestCase):
                     (
                         "ema200_not_crossed_up",
                         "quote_volume_not_above_average",
-                        "rsi_not_below_60",
                     ),
                 ),
             ],
@@ -1646,7 +1642,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.failures, ())
         self.assertCountEqual(loaded_symbols, ["PEPEUSDT", "DOGEUSDT"])
 
-    def test_stops_active_long_when_rsi_reaches_60(self) -> None:
+    def test_keeps_active_long_when_rsi_is_above_60(self) -> None:
         store = MemoryStore()
         store.states["PEPE"] = "long"
         notifier = RecordingNotifier()
@@ -1664,10 +1660,10 @@ class TradeDispatchTests(unittest.TestCase):
 
         result = dispatch_trade_signals(snapshot, lambda _: candles, store, notifier)
 
-        self.assertEqual(result.events, ("stop_long",))
+        self.assertEqual(result.events, ())
         self.assertEqual(notifier.signals, [])
-        self.assertIn("rsi_not_below_60", notifier.stop_longs[0][2])
-        self.assertEqual(store.states["PEPE"].status, "no_add")
+        self.assertEqual(notifier.stop_longs, [])
+        self.assertEqual(store.states["PEPE"].status, "long")
 
     def test_stops_active_long_when_close_is_below_ema200(self) -> None:
         store = MemoryStore()

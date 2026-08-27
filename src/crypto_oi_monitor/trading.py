@@ -17,7 +17,6 @@ EMA_SLOPE_LOOKBACK = 5
 EMA_BREAKOUT_LOOKBACK = 3
 VOLUME_AVERAGE_PERIOD = 20
 VOLUME_BREAKOUT_MULTIPLIER = 1.1
-ENTRY_RSI_MAX = 60
 EXIT_EMA_ATR_BUFFER = 0.5
 TRAILING_ACTIVATION_ATR = 3
 TRAILING_PROFIT_FLOOR_ATR = 1
@@ -195,8 +194,6 @@ def entry_reasons(indicators: TradeIndicators) -> tuple[str, ...]:
         <= VOLUME_BREAKOUT_MULTIPLIER * indicators.average_quote_volume
     ):
         reasons.append("quote_volume_not_above_average")
-    if indicators.rsi >= ENTRY_RSI_MAX:
-        reasons.append("rsi_not_below_60")
     if indicators.rsi <= indicators.previous_rsi:
         reasons.append("rsi_not_rising")
     return tuple(reasons)
@@ -204,8 +201,6 @@ def entry_reasons(indicators: TradeIndicators) -> tuple[str, ...]:
 
 def stop_long_reasons(indicators: TradeIndicators) -> tuple[str, ...]:
     reasons = []
-    if indicators.rsi >= ENTRY_RSI_MAX:
-        reasons.append("rsi_not_below_60")
     if indicators.close <= indicators.ema200:
         reasons.append("close_not_above_ema200")
     return tuple(reasons)
