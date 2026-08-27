@@ -71,7 +71,6 @@ class WeComNotifier:
     def send_trade_condition_list(
         self,
         can_long: tuple[str, ...],
-        stop_long: tuple[str, ...],
         exit_long: tuple[str, ...],
         periodic: bool,
     ) -> None:
@@ -81,7 +80,7 @@ class WeComNotifier:
                 "msgtype": "text",
                 "text": {
                     "content": _trade_condition_list_message(
-                        can_long, stop_long, exit_long, periodic
+                        can_long, exit_long, periodic
                     )
                 },
             },
@@ -161,18 +160,15 @@ def _trade_message(
 
 def _trade_condition_list_message(
     can_long: tuple[str, ...],
-    stop_long: tuple[str, ...],
     exit_long: tuple[str, ...],
     periodic: bool,
 ) -> str:
     title = "【交易条件列表定时播报】" if periodic else "【交易条件列表更新】"
     can_long_content = "、".join(can_long) or "暂无"
-    stop_long_content = "、".join(stop_long) or "暂无"
     exit_long_content = "、".join(exit_long) or "暂无"
     return (
         f"{title}\n\n"
         f"可以做多\n{can_long_content}\n\n"
-        f"停止做多\n{stop_long_content}\n\n"
         f"必须退出\n{exit_long_content}"
     )
 

@@ -39,7 +39,7 @@ class WeComNotifierTests(unittest.TestCase):
         notifier = WeComNotifier("https://wecom.example/webhook", client)
 
         notifier.send_trade_condition_list(
-            ("AKE", "BULLA"), ("ESPORTS", "ON"), ("KOMA",), periodic=False
+            ("AKE", "BULLA"), ("KOMA",), periodic=False
         )
 
         payload = client.sent[0][1]
@@ -47,7 +47,7 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertEqual(payload["msgtype"], "text")
         self.assertIn("交易条件列表更新", content)
         self.assertIn("AKE、BULLA", content)
-        self.assertIn("ESPORTS、ON", content)
+        self.assertNotIn("停止做多", content)
         self.assertIn("必须退出", content)
         self.assertIn("KOMA", content)
         self.assertNotIn("RSI", content)
@@ -57,7 +57,7 @@ class WeComNotifierTests(unittest.TestCase):
         client = RecordingClient()
         notifier = WeComNotifier("https://wecom.example/webhook", client)
 
-        notifier.send_trade_condition_list((), (), (), periodic=True)
+        notifier.send_trade_condition_list((), (), periodic=True)
 
         content = client.sent[0][1]["text"]["content"]
         self.assertIn("交易条件列表定时播报", content)

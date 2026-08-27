@@ -196,7 +196,6 @@ class TradeConditionListNotifier(Protocol):
     def send_trade_condition_list(
         self,
         can_long: tuple[str, ...],
-        stop_long: tuple[str, ...],
         exit_long: tuple[str, ...],
         periodic: bool,
     ) -> None: ...
@@ -311,7 +310,6 @@ def _condition_list_notification_event_id(
     event: str,
     previous: TradeConditionListState,
     can_long: tuple[str, ...],
-    stop_long: tuple[str, ...],
     exit_long: tuple[str, ...],
 ) -> str:
     payload = json.dumps(
@@ -323,7 +321,6 @@ def _condition_list_notification_event_id(
                 else previous.last_sent_at.isoformat()
             ),
             "can_long": can_long,
-            "stop_long": stop_long,
             "exit_long": exit_long,
         },
         ensure_ascii=True,
@@ -368,7 +365,6 @@ def dispatch_trade_condition_list(
     previous = store.get_trade_condition_list_state()
     has_new_symbols = bool(
         set(can_long) - set(previous.can_long)
-        or set(stop_long) - set(previous.stop_long)
         or set(exit_long) - set(previous.exit_long)
     )
     periodic = (
@@ -378,13 +374,13 @@ def dispatch_trade_condition_list(
     event = "updated" if has_new_symbols else "periodic" if periodic else None
     if event is not None:
         event_id = _condition_list_notification_event_id(
-            event, previous, can_long, stop_long, exit_long
+            event, previous, can_long, exit_long
         )
         _deliver_notification_once(
             store,
             event_id,
             lambda: notifier.send_trade_condition_list(
-                can_long, stop_long, exit_long, event == "periodic"
+                can_long, exit_long, event == "periodic"
             ),
         )
         store.set_trade_condition_list_state(
