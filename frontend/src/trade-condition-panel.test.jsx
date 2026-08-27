@@ -12,6 +12,8 @@ describe("TradeConditionPanel", () => {
 
     expect(html).toContain("最近3根内上穿 EMA200");
     expect(html).toContain("前20根均量的1.1倍");
+    expect(html).toContain("RSI 回升");
+    expect(html).not.toContain("RSI &lt; 60");
     expect(html).not.toContain("价格校正 OI 增长；成交额突破前20根均量的1.2倍");
   });
 

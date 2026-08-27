@@ -160,14 +160,16 @@ class TradeSetupTests(unittest.TestCase):
 
         self.assertIsNone(evaluate_trade_setup(candles))
 
-    def test_accepts_low_rsi_but_rejects_rsi_at_sixty(self) -> None:
+    def test_accepts_high_rsi_when_rsi_is_rising(self) -> None:
         self.assertEqual(
-            entry_reasons(self._valid_indicators(rsi=20, previous_rsi=19)),
+            entry_reasons(self._valid_indicators(rsi=78, previous_rsi=77)),
             (),
         )
+
+    def test_rejects_entry_when_rsi_is_not_rising(self) -> None:
         self.assertEqual(
-            entry_reasons(self._valid_indicators(rsi=60)),
-            ("rsi_not_below_60",),
+            entry_reasons(self._valid_indicators(rsi=78, previous_rsi=78)),
+            ("rsi_not_rising",),
         )
 
     def test_exposes_slope_reference_and_average_volume_from_closed_history(
@@ -189,6 +191,11 @@ class TradeSetupTests(unittest.TestCase):
             previous_rsi=42,
             quote_volume=80,
         )
+
+        self.assertEqual(stop_long_reasons(indicators), ())
+
+    def test_stop_long_does_not_use_high_rsi(self) -> None:
+        indicators = self._valid_indicators(rsi=78, previous_rsi=77)
 
         self.assertEqual(stop_long_reasons(indicators), ())
 

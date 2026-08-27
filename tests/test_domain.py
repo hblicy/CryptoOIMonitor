@@ -29,11 +29,11 @@ class RiskStatusTests(unittest.TestCase):
 
 
 class BinanceUniverseTests(unittest.TestCase):
-    def test_includes_symbol_at_ten_million_usd_turnover(self) -> None:
-        self.assertTrue(is_binance_universe_member("PERPETUAL", 10_000_000))
+    def test_includes_symbol_at_five_million_usd_turnover(self) -> None:
+        self.assertTrue(is_binance_universe_member("PERPETUAL", 5_000_000))
 
     def test_excludes_lower_turnover_and_non_perpetual_symbols(self) -> None:
-        self.assertFalse(is_binance_universe_member("PERPETUAL", 9_999_999.99))
+        self.assertFalse(is_binance_universe_member("PERPETUAL", 4_999_999.99))
         self.assertFalse(is_binance_universe_member("CURRENT_QUARTER", 50_000_000))
 
 

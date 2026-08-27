@@ -249,7 +249,7 @@ function App() {
               </tbody>
             </table>
           </div>
-          <footer className="table-footer">共 {rows.length} 条 · Binance USDⓈ 永续 24 小时成交额不少于 1,000 万 USD</footer>
+          <footer className="table-footer">共 {rows.length} 条 · Binance USDⓈ 永续 24 小时成交额不少于 500 万 USD</footer>
         </div>
         <DetailPanel selected={selected} />
       </section>
@@ -319,7 +319,7 @@ export function TradeConditionPanel({ scans, complete }) {
     <section className="trade-signal-panel" aria-label="交易条件扫描">
       <header className="trade-signal-heading">
         <strong>交易条件扫描</strong>
-        <span>OI / 市值 &gt; 90%；最近3根内上穿 EMA200、当前仍在其上方且 EMA200 向上；价格校正 OI 增长；成交额突破前20根均量的1.1倍；RSI &lt; 60 且回升</span>
+        <span>OI / 市值 &gt; 90%；最近3根内上穿 EMA200、当前仍在其上方且 EMA200 向上；价格校正 OI 增长；成交额突破前20根均量的1.1倍；RSI 回升</span>
       </header>
       {!complete && <p className="trade-signal-empty">数据源不完整：已暂停新开仓，已有交易状态的 15m 风控仍在执行。</p>}
       {!scans.length
