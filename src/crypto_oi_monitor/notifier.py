@@ -46,22 +46,6 @@ class WeComNotifier:
         if response["errcode"] != 0:
             raise RuntimeError(f"WeCom webhook rejected message: {response}")
 
-    def send_stop_long(
-        self,
-        comparison: dict[str, Any],
-        indicators: TradeIndicators | None,
-        reasons: tuple[str, ...],
-    ) -> None:
-        response = self.client.post_json(
-            self.webhook_url,
-            {
-                "msgtype": "text",
-                "text": {"content": _stop_long_message(comparison, indicators, reasons)},
-            },
-        )
-        if response["errcode"] != 0:
-            raise RuntimeError(f"WeCom webhook rejected message: {response}")
-
     def send_exit_long(
         self,
         comparison: dict[str, Any],
@@ -198,33 +182,6 @@ def _oi_to_market_cap_line(comparison: dict[str, Any]) -> str:
     if ratio is None:
         return "OI / 市值：不可用（数据源不完整）"
     return f"OI / 市值：{ratio * 100:.2f}%"
-
-
-def _stop_long_message(
-    comparison: dict[str, Any],
-    indicators: TradeIndicators | None,
-    reasons: tuple[str, ...],
-) -> str:
-    if not reasons:
-        raise ValueError("Stop-long message requires a stop condition")
-    if indicators is not None:
-        period = "周期：15m（已收盘）\n"
-        kline_metrics = (
-            f"RSI(14)：{indicators.rsi:.2f}\n"
-            f"收盘价：{indicators.close:.8f}\n"
-            f"EMA200：{indicators.ema200:.8f}\n"
-        )
-    else:
-        period = "周期：不适用（按 OI / 市值触发）\n"
-        kline_metrics = "15m K 线：本轮未获取，已按 OI / 市值条件停止开多。\n"
-    return (
-        "【交易信号：停止开多】\n"
-        f"币种：{comparison['canonical_symbol']}\n"
-        f"{period}"
-        f"{kline_metrics}"
-        f"原因：{'；'.join(_reason_text(reason) for reason in reasons)}，请勿继续开多或补仓。\n"
-        + _oi_to_market_cap_line(comparison)
-    )
 
 
 def _exit_long_message(
