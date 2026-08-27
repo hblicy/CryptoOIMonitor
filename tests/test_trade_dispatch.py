@@ -306,14 +306,14 @@ class ConditionListNotifier:
         self.lists = []
 
     def send_trade_condition_list(
-        self, can_long, stop_long, exit_long, periodic
+        self, can_long, exit_long, periodic
     ) -> None:
-        self.lists.append((can_long, stop_long, exit_long, periodic))
+        self.lists.append((can_long, exit_long, periodic))
 
 
 class FailingConditionListNotifier:
     def send_trade_condition_list(
-        self, can_long, stop_long, exit_long, periodic
+        self, can_long, exit_long, periodic
     ) -> None:
         raise RuntimeError("WeCom failed")
 
@@ -323,9 +323,9 @@ class ExitConditionListNotifier:
         self.lists = []
 
     def send_trade_condition_list(
-        self, can_long, stop_long, exit_long=(), periodic=False
+        self, can_long, exit_long=(), periodic=False
     ) -> None:
-        self.lists.append((can_long, stop_long, exit_long, periodic))
+        self.lists.append((can_long, exit_long, periodic))
 
 
 def _condition_scan(symbol: str, status: str) -> TradeConditionScan:
@@ -473,7 +473,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.scans[0].status, STOP_LONG)
         self.assertEqual(result.scans[0].reasons, ("data_source_incomplete",))
         self.assertEqual(store.states["PEPE"].status, NO_ADD)
-        self.assertEqual(notifier.stop_longs[0][0], "PEPE")
+        self.assertEqual(notifier.stop_longs, [])
 
     def test_requires_exit_when_an_active_long_hits_its_atr_stop(self) -> None:
         store = MemoryStore()
@@ -971,12 +971,40 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result, "updated")
         self.assertEqual(
             notifier.lists,
-            [(("AKE", "BULLA"), ("ESPORTS", "ON"), (), False)],
+            [(("AKE", "BULLA"), (), False)],
         )
         self.assertEqual(store.state.can_long, ("AKE", "BULLA"))
         self.assertEqual(store.state.stop_long, ("ESPORTS", "ON"))
         self.assertEqual(store.state.exit_long, ())
         self.assertEqual(store.state.last_sent_at, now)
+
+    def test_does_not_send_list_when_only_stop_long_symbols_appear(self) -> None:
+        now = datetime(2026, 8, 1, 0, 10, tzinfo=timezone.utc)
+        last_sent_at = now - timedelta(minutes=10)
+        store = ConditionListStore(
+            SimpleNamespace(
+                can_long=("AKE",),
+                stop_long=("ON",),
+                exit_long=(),
+                last_sent_at=last_sent_at,
+            )
+        )
+        notifier = ConditionListNotifier()
+
+        result = dispatch_trade_condition_list(
+            (
+                _condition_scan("AKE", CAN_LONG),
+                _condition_scan("ON", STOP_LONG),
+                _condition_scan("ESPORTS", STOP_LONG),
+            ),
+            store,
+            notifier,
+            now,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(notifier.lists, [])
+        self.assertEqual(store.state.last_sent_at, last_sent_at)
 
     def test_sends_must_exit_symbols_when_they_first_appear(self) -> None:
         now = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
@@ -995,7 +1023,7 @@ class TradeDispatchTests(unittest.TestCase):
         )
 
         self.assertEqual(result, "updated")
-        self.assertEqual(notifier.lists, [((), (), ("KOMA",), False)])
+        self.assertEqual(notifier.lists, [((), ("KOMA",), False)])
         self.assertEqual(store.state.exit_long, ("KOMA",))
 
     def test_keeps_last_notified_list_when_removals_are_not_sent(self) -> None:
@@ -1089,7 +1117,7 @@ class TradeDispatchTests(unittest.TestCase):
         )
 
         self.assertEqual(result, "periodic")
-        self.assertEqual(notifier.lists, [(("AKE",), ("ON",), (), True)])
+        self.assertEqual(notifier.lists, [(("AKE",), (), True)])
         self.assertEqual(store.state.last_sent_at, now)
 
     def test_does_not_update_list_state_when_notification_fails(self) -> None:
@@ -1543,7 +1571,7 @@ class TradeDispatchTests(unittest.TestCase):
             result.details[0].reasons,
             ("oi_to_market_cap_not_above_90",),
         )
-        self.assertEqual(notifier.stop_longs[0][0], "PEPE")
+        self.assertEqual(notifier.stop_longs, [])
         self.assertEqual(store.states["PEPE"].status, "no_add")
 
     def test_stops_active_long_when_oi_to_market_cap_is_below_90_percent(self) -> None:
@@ -1569,7 +1597,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(
             result.details[0].reasons, ("oi_to_market_cap_not_above_90",)
         )
-        self.assertEqual(notifier.stop_longs[0][0], "PEPE")
+        self.assertEqual(notifier.stop_longs, [])
         self.assertEqual(store.states["PEPE"].status, "no_add")
         self.assertEqual(len(result.scans), 1)
         self.assertEqual(result.scans[0].status, STOP_LONG)
@@ -1607,7 +1635,7 @@ class TradeDispatchTests(unittest.TestCase):
             result.details[0].reasons, ("oi_to_market_cap_not_above_90",)
         )
         self.assertIsNone(result.details[0].candle_close_time)
-        self.assertEqual(notifier.stop_longs[0][0], "PEPE")
+        self.assertEqual(notifier.stop_longs, [])
         self.assertEqual(store.states["PEPE"].status, "no_add")
 
     def test_loads_risk_candles_before_sending_oi_threshold_stop(self) -> None:
@@ -1688,12 +1716,9 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertIn(
             "close_not_above_ema200", result.details[0].reasons
         )
-        self.assertEqual(notifier.stop_longs[0][0], "PEPE")
-        self.assertLess(notifier.stop_longs[0][1].rsi, 50)
-        self.assertLess(
-            notifier.stop_longs[0][1].close,
-            notifier.stop_longs[0][1].ema200,
-        )
+        self.assertEqual(notifier.stop_longs, [])
+        self.assertLess(result.details[0].rsi, 50)
+        self.assertLess(result.details[0].close, result.details[0].ema200)
         self.assertEqual(store.states["PEPE"].status, "no_add")
 
     def test_clears_legacy_short_state_then_scans_and_evaluates_long(self) -> None:

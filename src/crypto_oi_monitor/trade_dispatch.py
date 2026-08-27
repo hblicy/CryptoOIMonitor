@@ -196,7 +196,6 @@ class TradeConditionListNotifier(Protocol):
     def send_trade_condition_list(
         self,
         can_long: tuple[str, ...],
-        stop_long: tuple[str, ...],
         exit_long: tuple[str, ...],
         periodic: bool,
     ) -> None: ...
@@ -235,13 +234,6 @@ class TradeSignalNotifier(Protocol):
         comparison: dict[str, Any],
         previous_aggregate_oi_usd: float,
         event_type: str,
-    ) -> None: ...
-
-    def send_stop_long(
-        self,
-        comparison: dict[str, Any],
-        indicators: TradeIndicators | None,
-        reasons: tuple[str, ...],
     ) -> None: ...
 
     def send_exit_long(
@@ -318,7 +310,6 @@ def _condition_list_notification_event_id(
     event: str,
     previous: TradeConditionListState,
     can_long: tuple[str, ...],
-    stop_long: tuple[str, ...],
     exit_long: tuple[str, ...],
 ) -> str:
     payload = json.dumps(
@@ -330,7 +321,6 @@ def _condition_list_notification_event_id(
                 else previous.last_sent_at.isoformat()
             ),
             "can_long": can_long,
-            "stop_long": stop_long,
             "exit_long": exit_long,
         },
         ensure_ascii=True,
@@ -375,7 +365,6 @@ def dispatch_trade_condition_list(
     previous = store.get_trade_condition_list_state()
     has_new_symbols = bool(
         set(can_long) - set(previous.can_long)
-        or set(stop_long) - set(previous.stop_long)
         or set(exit_long) - set(previous.exit_long)
     )
     periodic = (
@@ -385,13 +374,13 @@ def dispatch_trade_condition_list(
     event = "updated" if has_new_symbols else "periodic" if periodic else None
     if event is not None:
         event_id = _condition_list_notification_event_id(
-            event, previous, can_long, stop_long, exit_long
+            event, previous, can_long, exit_long
         )
         _deliver_notification_once(
             store,
             event_id,
             lambda: notifier.send_trade_condition_list(
-                can_long, stop_long, exit_long, event == "periodic"
+                can_long, exit_long, event == "periodic"
             ),
         )
         store.set_trade_condition_list_state(
@@ -530,21 +519,10 @@ def dispatch_trade_signals(
                     next_state = replace(
                         state, status=NO_ADD, binance_symbol=binance_symbol
                     )
-                    event_id = _trade_notification_event_id(
-                        STOP_LONG, canonical_symbol, state=state
-                    )
-                    _deliver_trade_notification_once(
-                        store,
-                        event_id,
-                        canonical_symbol,
-                        next_state,
-                        lambda: notifier.send_stop_long(comparison, None, reasons),
-                    )
                     store.set_trade_signal_state(
                         canonical_symbol,
                         next_state,
                     )
-                    store.mark_trade_notification_state_applied(event_id)
                 except Exception as error:
                     record_candidate_failure(canonical_symbol, error)
                     continue
@@ -748,22 +726,9 @@ def dispatch_trade_signals(
                 if state.status == LONG:
                     try:
                         next_state = replace(state, status=NO_ADD)
-                        event_id = _trade_notification_event_id(
-                            STOP_LONG, canonical_symbol, state=state
-                        )
-                        _deliver_trade_notification_once(
-                            store,
-                            event_id,
-                            canonical_symbol,
-                            next_state,
-                            lambda: notifier.send_stop_long(
-                                comparison, indicators, reasons
-                            ),
-                        )
                         store.set_trade_signal_state(
                             canonical_symbol, next_state
                         )
-                        store.mark_trade_notification_state_applied(event_id)
                     except Exception as error:
                         record_candidate_failure(canonical_symbol, error)
                         continue
@@ -795,23 +760,10 @@ def dispatch_trade_signals(
                 if state.status == LONG:
                     try:
                         next_state = replace(state, status=NO_ADD)
-                        event_id = _trade_notification_event_id(
-                            STOP_LONG, canonical_symbol, state=state
-                        )
-                        _deliver_trade_notification_once(
-                            store,
-                            event_id,
-                            canonical_symbol,
-                            next_state,
-                            lambda: notifier.send_stop_long(
-                                comparison, indicators, reasons
-                            ),
-                        )
                         store.set_trade_signal_state(
                             canonical_symbol,
                             next_state,
                         )
-                        store.mark_trade_notification_state_applied(event_id)
                     except Exception as error:
                         record_candidate_failure(canonical_symbol, error)
                         continue
@@ -838,23 +790,10 @@ def dispatch_trade_signals(
                 )
                 try:
                     next_state = replace(state, status=NO_ADD)
-                    event_id = _trade_notification_event_id(
-                        STOP_LONG, canonical_symbol, state=state
-                    )
-                    _deliver_trade_notification_once(
-                        store,
-                        event_id,
-                        canonical_symbol,
-                        next_state,
-                        lambda: notifier.send_stop_long(
-                            comparison, indicators, reasons
-                        ),
-                    )
                     store.set_trade_signal_state(
                         canonical_symbol,
                         next_state,
                     )
-                    store.mark_trade_notification_state_applied(event_id)
                 except Exception as error:
                     record_candidate_failure(canonical_symbol, error)
                     continue
