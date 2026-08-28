@@ -15,6 +15,7 @@ from app import (
     ManualRefreshRejected,
     MonitorApplication,
     next_refresh_schedule,
+    non_negative_usd_amount,
     positive_refresh_seconds,
     required_environment_value,
 )
@@ -30,6 +31,27 @@ from crypto_oi_monitor.trade_dispatch import (
     TradeSignalState,
 )
 from crypto_oi_monitor.trading import LONG
+
+
+class UsdAmountArgumentTests(unittest.TestCase):
+    def test_parses_plain_and_suffixed_usd_amounts(self) -> None:
+        expected = {
+            "0": 0,
+            "5000000": 5_000_000,
+            "5M": 5_000_000,
+            "7.5m": 7_500_000,
+            "12K": 12_000,
+            "0.02B": 20_000_000,
+        }
+        for value, amount in expected.items():
+            with self.subTest(value=value):
+                self.assertEqual(non_negative_usd_amount(value), amount)
+
+    def test_rejects_invalid_usd_amounts(self) -> None:
+        for value in ("-1", "NaN", "inf", "5T", "5 M", "5,000,000", "", "1e6"):
+            with self.subTest(value=value):
+                with self.assertRaises(ArgumentTypeError):
+                    non_negative_usd_amount(value)
 
 
 class FakeCoordinator:
@@ -65,9 +87,15 @@ class TradeSignalOnlyNotifier:
         raise AssertionError("不应发送 OI 埋伏候选提醒")
 
 
+def new_application(binance_min_turnover_usd: float = 5_000_000) -> MonitorApplication:
+    application = MonitorApplication.__new__(MonitorApplication)
+    application.binance_min_turnover_usd = binance_min_turnover_usd
+    return application
+
+
 class AppRefreshTests(unittest.TestCase):
     def test_incomplete_snapshot_still_dispatches_active_risk_signals(self) -> None:
-        application = MonitorApplication.__new__(MonitorApplication)
+        application = new_application()
         application.coordinator = FakeCoordinator(
             {"complete": False, "comparisons": [], "unmapped_assets": ["PEPE"]}
         )
@@ -106,7 +134,7 @@ class AppRefreshTests(unittest.TestCase):
         )
 
     def test_scans_conditions_when_wecom_is_not_configured(self) -> None:
-        application = MonitorApplication.__new__(MonitorApplication)
+        application = new_application()
         application.coordinator = FakeCoordinator()
         application.store = FakeStore()
         application.notifier = None
@@ -134,7 +162,7 @@ class AppRefreshTests(unittest.TestCase):
         )
 
     def test_skips_ambush_notifications_and_dispatches_trade_signals(self) -> None:
-        application = MonitorApplication.__new__(MonitorApplication)
+        application = new_application()
         application.coordinator = FakeCoordinator(
             {
                 "complete": True,
@@ -181,7 +209,7 @@ class AppRefreshTests(unittest.TestCase):
         )
 
     def test_clears_states_not_in_a_complete_snapshot(self) -> None:
-        application = MonitorApplication.__new__(MonitorApplication)
+        application = new_application()
         application.coordinator = FakeCoordinator()
         application.store = FakeStore()
         application.notifier = None
@@ -193,7 +221,7 @@ class AppRefreshTests(unittest.TestCase):
         self.assertEqual(application.store.active_assets, set())
 
     def test_keeps_states_for_cmc_unmapped_assets_in_a_complete_snapshot(self) -> None:
-        application = MonitorApplication.__new__(MonitorApplication)
+        application = new_application()
         application.coordinator = FakeCoordinator(
             {
                 "complete": True,
@@ -213,7 +241,7 @@ class AppRefreshTests(unittest.TestCase):
         self.assertEqual(application.store.active_assets, {"PEPE", "AAA"})
 
     def test_keeps_active_trade_states_after_assets_leave_the_binance_universe(self) -> None:
-        application = MonitorApplication.__new__(MonitorApplication)
+        application = new_application()
         application.coordinator = FakeCoordinator()
         application.store = FakeStore()
         application.store.trade_states = {
@@ -230,7 +258,7 @@ class AppRefreshTests(unittest.TestCase):
         self.assertEqual(application.store.active_assets, {"PEPE", "DOGE", "OLD"})
 
     def test_records_trade_signal_failures_without_breaking_snapshot_json(self) -> None:
-        application = MonitorApplication.__new__(MonitorApplication)
+        application = new_application()
         application.coordinator = FakeCoordinator()
         application.store = FakeStore()
         application.notifier = object()
@@ -255,7 +283,7 @@ class AppRefreshTests(unittest.TestCase):
         json.dumps(snapshot)
 
     def test_exposes_trade_signal_details_to_the_web_summary(self) -> None:
-        application = MonitorApplication.__new__(MonitorApplication)
+        application = new_application(8_000_000)
         application.coordinator = FakeCoordinator()
         application.store = FakeStore()
         application.notifier = object()
@@ -297,9 +325,22 @@ class AppRefreshTests(unittest.TestCase):
             snapshot["notification"]["trade_condition_scans"],
             [scan.as_dict()],
         )
+        self.assertEqual(
+            snapshot["settings"]["binance_min_turnover_usd"],
+            8_000_000,
+        )
+
+    def test_summary_exposes_the_current_binance_turnover_threshold(self) -> None:
+        application = new_application(8_000_000)
+        application._latest = {"complete": True}
+
+        summary = application.summary()
+
+        self.assertEqual(summary["settings"]["binance_min_turnover_usd"], 8_000_000)
+        self.assertNotIn("settings", application._latest)
 
     def test_pushes_condition_list_after_a_complete_condition_scan(self) -> None:
-        application = MonitorApplication.__new__(MonitorApplication)
+        application = new_application()
         application.coordinator = FakeCoordinator()
         application.store = FakeStore()
         application.notifier = object()
@@ -331,11 +372,12 @@ class AppRefreshTests(unittest.TestCase):
             "app.SnapshotStore"
         ) as store_class, patch("app.fetch_bingx_open_interest") as bingx_loader, patch(
             "app.fetch_lighter_open_interest"
-        ) as lighter_loader:
+        ) as lighter_loader, patch("app.fetch_binance_universe") as universe_loader:
             store_class.return_value.load_latest_snapshot.return_value = None
-            application = MonitorApplication()
+            application = MonitorApplication(binance_min_turnover_usd=8_000_000)
             universe = {"ETH": object()}
 
+            application.coordinator.universe_loader()
             application.coordinator.venue_loaders["BingX"](universe)
             application.coordinator.venue_loaders["Lighter"](universe)
 
@@ -344,11 +386,12 @@ class AppRefreshTests(unittest.TestCase):
         self.assertEqual(bingx_loader.call_args.args[0].timeout_seconds, 12)
         self.assertEqual(bingx_loader.call_args.args[1], {"ETH"})
         self.assertEqual(lighter_loader.call_args.args[1], {"ETH"})
+        universe_loader.assert_called_once_with(ANY, 8_000_000)
 
 
 class ManualRefreshTests(unittest.TestCase):
     def test_manual_refresh_requires_the_configured_token(self) -> None:
-        application = MonitorApplication.__new__(MonitorApplication)
+        application = new_application()
         application._manual_refresh_token = "test-refresh-token"
 
         self.assertFalse(application.manual_refresh_is_authorized(None))
@@ -358,13 +401,13 @@ class ManualRefreshTests(unittest.TestCase):
         )
 
     def test_manual_refresh_is_disabled_without_a_configured_token(self) -> None:
-        application = MonitorApplication.__new__(MonitorApplication)
+        application = new_application()
         application._manual_refresh_token = None
 
         self.assertFalse(application.manual_refresh_is_authorized("any-token"))
 
     def test_limits_successive_manual_refreshes_from_the_last_manual_completion(self) -> None:
-        application = MonitorApplication.__new__(MonitorApplication)
+        application = new_application()
         application._lock = threading.RLock()
         application._manual_refresh_min_interval_seconds = 120
         times = iter((100.0, 110.0, 150.0))
@@ -378,7 +421,7 @@ class ManualRefreshTests(unittest.TestCase):
         self.assertEqual(raised.exception.retry_after_seconds, 80)
 
     def test_rejects_immediately_when_another_refresh_holds_the_lock(self) -> None:
-        application = MonitorApplication.__new__(MonitorApplication)
+        application = new_application()
         application._lock = threading.Lock()
         application._lock.acquire()
         application._manual_refresh_min_interval_seconds = 120
@@ -391,7 +434,7 @@ class ManualRefreshTests(unittest.TestCase):
             application._lock.release()
 
     def test_rejects_manual_refresh_inside_the_minimum_interval(self) -> None:
-        application = MonitorApplication.__new__(MonitorApplication)
+        application = new_application()
         application._lock = threading.Lock()
         application._manual_refresh_min_interval_seconds = 120
         application._last_manual_refresh_completed_at = 100.0

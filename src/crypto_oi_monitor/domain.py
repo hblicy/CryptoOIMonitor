@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import math
 
 
-BINANCE_MIN_TURNOVER_USD = 5_000_000
 FOCUS_OI_TO_MARKET_CAP_RATIO = 1.1
 TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO = 0.9
 AMBUSH_OI_TO_MARKET_CAP_RATIO = 2
@@ -45,8 +44,12 @@ def risk_status(oi_to_market_cap: float) -> str:
     return NORMAL
 
 
-def is_binance_universe_member(contract_type: str, quote_volume_usd: float) -> bool:
-    return contract_type == "PERPETUAL" and quote_volume_usd >= BINANCE_MIN_TURNOVER_USD
+def is_binance_universe_member(
+    contract_type: str,
+    quote_volume_usd: float,
+    min_turnover_usd: float,
+) -> bool:
+    return contract_type == "PERPETUAL" and quote_volume_usd >= min_turnover_usd
 
 
 def aggregate_asset(

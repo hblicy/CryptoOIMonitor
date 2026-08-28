@@ -3,6 +3,20 @@ const usdFormatter = new Intl.NumberFormat("en-US", {
   currency: "USD",
   maximumFractionDigits: 2,
 });
+const compactNumberFormatter = new Intl.NumberFormat("zh-CN", {
+  maximumFractionDigits: 2,
+});
+
+export function formatChineseUsd(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+    return "—";
+  }
+  const numeric = Number(value);
+  if (Math.abs(numeric) >= 10_000) {
+    return `${compactNumberFormatter.format(numeric / 10_000)} 万 USD`;
+  }
+  return `${compactNumberFormatter.format(numeric)} USD`;
+}
 
 export function formatUsd(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {

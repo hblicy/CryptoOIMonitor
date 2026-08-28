@@ -8,6 +8,7 @@ from logging.handlers import RotatingFileHandler
 import math
 import mimetypes
 import os
+import re
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -52,6 +53,7 @@ from crypto_oi_monitor.trade_dispatch import (
 from crypto_oi_monitor.trading import LONG, fetch_binance_closed_candles
 
 LOGGER = logging.getLogger("crypto_oi_monitor")
+USD_SUFFIX_MULTIPLIERS = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
 
 
 class ManualRefreshRejected(RuntimeError):
@@ -65,6 +67,23 @@ def required_environment_value(name: str) -> str:
     if not value:
         raise RuntimeError(f"{name} must not be empty")
     return value
+
+
+def non_negative_usd_amount(value: str) -> float:
+    normalized = value.strip()
+    match = re.fullmatch(
+        r"(?:\d+(?:\.\d*)?|\.\d+)([KMB]?)", normalized, re.IGNORECASE
+    )
+    if match is None:
+        raise argparse.ArgumentTypeError(
+            "USD amount must be a non-negative number with optional K, M, or B suffix"
+        )
+    suffix = match.group(1).upper()
+    number_text = normalized[:-1] if suffix else normalized
+    amount = float(number_text) * USD_SUFFIX_MULTIPLIERS[suffix]
+    if not math.isfinite(amount):
+        raise argparse.ArgumentTypeError("USD amount must be finite")
+    return amount
 
 
 def configure_logging(
@@ -114,7 +133,9 @@ class MonitorApplication:
         snapshot_retention_days: int = 30,
         min_free_disk_bytes: int = 2 * 1024**3,
         manual_refresh_min_interval_seconds: int = 120,
+        binance_min_turnover_usd: float = 5_000_000,
     ) -> None:
+        self.binance_min_turnover_usd = binance_min_turnover_usd
         self.store = SnapshotStore(
             ROOT / "data" / "monitor.db",
             snapshot_retention_days,
@@ -130,7 +151,9 @@ class MonitorApplication:
             id_overrides=parse_cmc_id_overrides(os.environ.get("CMC_ID_OVERRIDES")),
         )
         self.coordinator = RefreshCoordinator(
-            universe_loader=lambda: fetch_binance_universe(public_client),
+            universe_loader=lambda: fetch_binance_universe(
+                public_client, self.binance_min_turnover_usd
+            ),
             venue_loaders={
                 "Binance": lambda universe: fetch_binance_open_interest(
                     public_client, universe
@@ -197,6 +220,9 @@ class MonitorApplication:
     def refresh(self) -> dict[str, Any]:
         with self._lock:
             snapshot = self.coordinator.refresh()
+            snapshot["settings"] = {
+                "binance_min_turnover_usd": self.binance_min_turnover_usd,
+            }
             reference_snapshot = None
             if snapshot["complete"]:
                 captured_at = datetime.fromisoformat(snapshot["captured_at"])
@@ -391,10 +417,17 @@ class MonitorApplication:
         return hmac.compare_digest(configured_token, provided_token)
 
     def summary(self) -> dict[str, Any]:
-        return self._latest or {
-            "state": "waiting_for_first_refresh",
-            "message": "等待首次数据刷新。",
+        summary = dict(
+            self._latest
+            or {
+                "state": "waiting_for_first_refresh",
+                "message": "等待首次数据刷新。",
+            }
+        )
+        summary["settings"] = {
+            "binance_min_turnover_usd": self.binance_min_turnover_usd,
         }
+        return summary
 
 
 def encode_json_payload(payload: dict[str, Any]) -> bytes:
@@ -551,6 +584,11 @@ def main() -> None:
         default=os.environ.get("MIN_FREE_DISK_GB", "2"),
     )
     parser.add_argument(
+        "--binance-min-turnover-usd",
+        type=non_negative_usd_amount,
+        default=os.environ.get("BINANCE_MIN_TURNOVER_USD", "5M"),
+    )
+    parser.add_argument(
         "--log-file",
         type=Path,
         default=os.environ.get("LOG_FILE"),
@@ -568,10 +606,11 @@ def main() -> None:
     args = parser.parse_args()
     configure_logging(args.log_file, args.log_max_mb, args.log_backup_count)
     application = MonitorApplication(
-        args.cmc_refresh_seconds,
-        args.snapshot_retention_days,
-        int(args.min_free_disk_gb * 1024**3),
-        args.refresh_seconds,
+        cmc_refresh_seconds=args.cmc_refresh_seconds,
+        snapshot_retention_days=args.snapshot_retention_days,
+        min_free_disk_bytes=int(args.min_free_disk_gb * 1024**3),
+        manual_refresh_min_interval_seconds=args.refresh_seconds,
+        binance_min_turnover_usd=args.binance_min_turnover_usd,
     )
     stopped = start_refresh_loop(application, args.refresh_seconds)
     handler = type(

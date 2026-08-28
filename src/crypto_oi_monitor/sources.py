@@ -69,7 +69,9 @@ def canonical_symbol(raw_symbol: str) -> str:
 
 
 def parse_binance_universe(
-    exchange_info: dict[str, Any], tickers: list[dict[str, Any]]
+    exchange_info: dict[str, Any],
+    tickers: list[dict[str, Any]],
+    min_turnover_usd: float,
 ) -> dict[str, BinanceInstrument]:
     tickers_by_symbol = {ticker["symbol"]: ticker for ticker in tickers}
     universe: dict[str, BinanceInstrument] = {}
@@ -83,7 +85,7 @@ def parse_binance_universe(
         ):
             raise ValueError("Binance quote volume must be finite non-negative")
         if ticker is None or not is_binance_universe_member(
-            instrument["contractType"], turnover
+            instrument["contractType"], turnover, min_turnover_usd
         ):
             continue
         canonical = canonical_symbol(instrument["baseAsset"])
@@ -343,10 +345,13 @@ def parse_lighter_open_interest(
     return result
 
 
-def fetch_binance_universe(client: PublicHttpClient) -> dict[str, BinanceInstrument]:
+def fetch_binance_universe(
+    client: PublicHttpClient, min_turnover_usd: float
+) -> dict[str, BinanceInstrument]:
     return parse_binance_universe(
         client.get_json(BINANCE_EXCHANGE_INFO_URL),
         client.get_json(BINANCE_TICKERS_URL),
+        min_turnover_usd,
     )
 
 

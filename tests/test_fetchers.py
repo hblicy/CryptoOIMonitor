@@ -95,7 +95,7 @@ class FetcherTests(unittest.TestCase):
     def test_fetches_binance_universe_from_the_two_public_market_endpoints(self) -> None:
         client = FakeHttpClient()
 
-        universe = fetch_binance_universe(client)
+        universe = fetch_binance_universe(client, 5_000_000)
 
         self.assertEqual(tuple(universe), ("ETH",))
         self.assertEqual(
