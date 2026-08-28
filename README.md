@@ -2,7 +2,7 @@
 
 汇总 CEX（Binance、OKX、Bybit、Bitget、Gate、KuCoin、BingX、MEXC）与 DEX（Hyperliquid、Aster、Lighter）的永续合约 OI，并按 CoinMarketCap 市值计算 `OI / MC`。OKX 仅统计 USDT 保证金永续合约，避免与币本位合约重复聚合。
 
-- 币种池：仅 Binance USDⓈ 永续合约，且 24 小时美元成交额不少于 **500 万 USD**。
+- 币种池：仅 Binance USDⓈ 永续合约，24 小时美元成交额门槛默认 `5M`，可通过 `BINANCE_MIN_TURNOVER_USD` 自定义。
 - 黄色重点关注：`OI > 1.1 × MC`。
 - 红色埋伏候选：`OI > 2 × MC`。
 - 当任一交易所或 CoinMarketCap 本轮请求失败时，页面显示数据源错误并暂停新开仓及交易条件列表推送；已有做多/停止做多状态仍使用 Binance 已收盘 15m K 线执行停止做多和必须退出风控。
@@ -26,7 +26,7 @@ python app.py --port 8766
 打开 <http://127.0.0.1:8766>。
 
 页面服务启动后立即刷新，正常情况下按固定 120 秒时间点刷新；若单轮耗时达到或超过 120 秒，下一轮会从本轮完成后再等待完整的 120 秒，避免持续零等待刷新放大交易所和 CoinMarketCap 压力。Binance、BingX 和 Aster 需按交易对拉取 OI，首轮全量刷新通常需要约一分钟；BingX 单个请求超过 12 秒会将该数据源标记为异常并暂停提醒推送。页面会保留最近一次完整快照并显示其时间。
-`COINMARKETCAP_API_KEY` 必须存在且不能是空字符串。`REFRESH_SECONDS`、`CMC_REFRESH_SECONDS`、`SNAPSHOT_RETENTION_DAYS`、`MIN_FREE_DISK_GB`、`LOG_MAX_MB` 和 `LOG_BACKUP_COUNT` 必须是大于 0 的整数；配置为 `0` 或负数时服务会拒绝启动。OI 按 `REFRESH_SECONDS`（默认 120 秒）刷新；CoinMarketCap 市值按 `CMC_REFRESH_SECONDS`（默认 600 秒）独立刷新。网页手动刷新要求请求头携带独立的 `MANUAL_REFRESH_TOKEN`；未配置时接口保持禁用，首次点击“刷新数据”会要求输入令牌并仅保存到当前浏览器会话。手动刷新采用非阻塞锁，同一时间只允许一轮刷新，且两次成功的手动刷新至少间隔 `REFRESH_SECONDS`；未授权时返回 HTTP 403，过于频繁时返回 HTTP 429。
+`COINMARKETCAP_API_KEY` 必须存在且不能是空字符串。`REFRESH_SECONDS`、`CMC_REFRESH_SECONDS`、`SNAPSHOT_RETENTION_DAYS`、`MIN_FREE_DISK_GB`、`LOG_MAX_MB` 和 `LOG_BACKUP_COUNT` 必须是大于 0 的整数；配置为 `0` 或负数时服务会拒绝启动。`BINANCE_MIN_TURNOVER_USD` 支持纯数字以及不区分大小写的 `K`、`M`、`B` 简写（例如 `7.5M`），默认 `5M`；修改 `.env` 后需要重启服务才会生效。该配置只控制 Binance 24 小时成交额币种池，不改变开多条件中的 15m 成交额突破均量规则。OI 按 `REFRESH_SECONDS`（默认 120 秒）刷新；CoinMarketCap 市值按 `CMC_REFRESH_SECONDS`（默认 600 秒）独立刷新。网页手动刷新要求请求头携带独立的 `MANUAL_REFRESH_TOKEN`；未配置时接口保持禁用，首次点击“刷新数据”会要求输入令牌并仅保存到当前浏览器会话。手动刷新采用非阻塞锁，同一时间只允许一轮刷新，且两次成功的手动刷新至少间隔 `REFRESH_SECONDS`；未授权时返回 HTTP 403，过于频繁时返回 HTTP 429。
 
 同一进程会缓存已确认的 CoinMarketCap 币种 ID，后续市值刷新只请求报价，不会重复请求映射接口；币种池在缓存有效期内变化时不会提前调用 CMC，新币先标记为未映射并在下一次定时刷新处理。未映射或符号歧义的币种每小时会重新尝试映射一次。实际请求市值时会在日志中记录。
 
