@@ -15,6 +15,7 @@ from app import (
     ManualRefreshRejected,
     MonitorApplication,
     next_refresh_schedule,
+    non_negative_usd_amount,
     positive_refresh_seconds,
     required_environment_value,
 )
@@ -30,6 +31,27 @@ from crypto_oi_monitor.trade_dispatch import (
     TradeSignalState,
 )
 from crypto_oi_monitor.trading import LONG
+
+
+class UsdAmountArgumentTests(unittest.TestCase):
+    def test_parses_plain_and_suffixed_usd_amounts(self) -> None:
+        expected = {
+            "0": 0,
+            "5000000": 5_000_000,
+            "5M": 5_000_000,
+            "7.5m": 7_500_000,
+            "12K": 12_000,
+            "0.02B": 20_000_000,
+        }
+        for value, amount in expected.items():
+            with self.subTest(value=value):
+                self.assertEqual(non_negative_usd_amount(value), amount)
+
+    def test_rejects_invalid_usd_amounts(self) -> None:
+        for value in ("-1", "NaN", "inf", "5T", "5 M", "5,000,000", "", "1e6"):
+            with self.subTest(value=value):
+                with self.assertRaises(ArgumentTypeError):
+                    non_negative_usd_amount(value)
 
 
 class FakeCoordinator:

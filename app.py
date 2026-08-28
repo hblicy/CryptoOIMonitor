@@ -8,6 +8,7 @@ from logging.handlers import RotatingFileHandler
 import math
 import mimetypes
 import os
+import re
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -52,6 +53,7 @@ from crypto_oi_monitor.trade_dispatch import (
 from crypto_oi_monitor.trading import LONG, fetch_binance_closed_candles
 
 LOGGER = logging.getLogger("crypto_oi_monitor")
+USD_SUFFIX_MULTIPLIERS = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
 
 
 class ManualRefreshRejected(RuntimeError):
@@ -65,6 +67,23 @@ def required_environment_value(name: str) -> str:
     if not value:
         raise RuntimeError(f"{name} must not be empty")
     return value
+
+
+def non_negative_usd_amount(value: str) -> float:
+    normalized = value.strip()
+    match = re.fullmatch(
+        r"(?:\d+(?:\.\d*)?|\.\d+)([KMB]?)", normalized, re.IGNORECASE
+    )
+    if match is None:
+        raise argparse.ArgumentTypeError(
+            "USD amount must be a non-negative number with optional K, M, or B suffix"
+        )
+    suffix = match.group(1).upper()
+    number_text = normalized[:-1] if suffix else normalized
+    amount = float(number_text) * USD_SUFFIX_MULTIPLIERS[suffix]
+    if not math.isfinite(amount):
+        raise argparse.ArgumentTypeError("USD amount must be finite")
+    return amount
 
 
 def configure_logging(
