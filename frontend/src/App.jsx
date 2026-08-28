@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { formatRatio, formatShanghaiTime, formatUsd, riskLabel } from "./format";
+import {
+  formatChineseUsd,
+  formatRatio,
+  formatShanghaiTime,
+  formatUsd,
+  riskLabel,
+} from "./format";
 
 export const SOURCE_GROUPS = [
   {
@@ -249,7 +255,10 @@ function App() {
               </tbody>
             </table>
           </div>
-          <footer className="table-footer">共 {rows.length} 条 · Binance USDⓈ 永续 24 小时成交额不少于 500 万 USD</footer>
+          <footer className="table-footer">
+            共 {rows.length} 条 · Binance USDⓈ 永续 24 小时成交额不少于{" "}
+            {formatChineseUsd(summary?.settings?.binance_min_turnover_usd)}
+          </footer>
         </div>
         <DetailPanel selected={selected} />
       </section>

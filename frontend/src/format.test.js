@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatRatio, formatUsd, riskLabel } from "./format";
+import { formatChineseUsd, formatRatio, formatUsd, riskLabel } from "./format";
 
 describe("dashboard formatting", () => {
   it("formats large USD values compactly", () => {
@@ -16,5 +16,12 @@ describe("dashboard formatting", () => {
 
   it("does not render a missing OI ratio as zero", () => {
     expect(formatRatio(null)).toBe("\u2014");
+  });
+
+  it("formats configured turnover thresholds in Chinese units", () => {
+    expect(formatChineseUsd(5_000_000)).toBe("500 万 USD");
+    expect(formatChineseUsd(10_000_000)).toBe("1,000 万 USD");
+    expect(formatChineseUsd(2_500)).toBe("2,500 USD");
+    expect(formatChineseUsd(null)).toBe("—");
   });
 });
