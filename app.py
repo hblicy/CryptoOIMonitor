@@ -224,6 +224,7 @@ class MonitorApplication:
                 "binance_min_turnover_usd": self.binance_min_turnover_usd,
             }
             reference_snapshot = None
+            trade_signal_states = self.store.list_trade_signal_states()
             if snapshot["complete"]:
                 captured_at = datetime.fromisoformat(snapshot["captured_at"])
                 reference_snapshot = self.store.load_complete_snapshot_near(
@@ -239,7 +240,7 @@ class MonitorApplication:
                 } | set(snapshot.get("unmapped_assets", []))
                 active_assets.update(
                     canonical_symbol
-                    for canonical_symbol, state in self.store.list_trade_signal_states().items()
+                    for canonical_symbol, state in trade_signal_states.items()
                     if state.status in {LONG, NO_ADD, REENTRY_COOLDOWN}
                 )
                 removed_alerts, removed_trade_signals = self.store.clear_states_outside(
@@ -251,15 +252,30 @@ class MonitorApplication:
                         removed_alerts,
                         removed_trade_signals,
                     )
+            active_trade_states = {
+                canonical_symbol: state
+                for canonical_symbol, state in trade_signal_states.items()
+                if state.status in {LONG, NO_ADD, REENTRY_COOLDOWN}
+            }
             if self.notifier is None:
+                condition_scan_result = scan_trade_conditions(
+                    snapshot,
+                    reference_snapshot,
+                    self.trade_kline_loader,
+                    active_trade_states,
+                )
+                for canonical_symbol, state in condition_scan_result.state_updates:
+                    try:
+                        self.store.set_trade_signal_state(canonical_symbol, state)
+                    except Exception:
+                        LOGGER.exception(
+                            "无法保存 %s 的风控检查点",
+                            canonical_symbol,
+                        )
                 snapshot["notification"] = {
                     "status": "not_configured",
                     "message": "WECOM_ROBOT_WEBHOOK_URL 未配置，企业微信推送未启用。",
-                    **_condition_scan_payload(
-                        scan_trade_conditions(
-                            snapshot, reference_snapshot, self.trade_kline_loader
-                        )
-                    ),
+                    **_condition_scan_payload(condition_scan_result),
                 }
             else:
                 try:
@@ -272,15 +288,41 @@ class MonitorApplication:
                     )
                 except Exception as error:
                     LOGGER.exception("交易信号推送失败")
+                    try:
+                        fallback_trade_states = (
+                            self.store.list_trade_signal_states()
+                        )
+                    except Exception:
+                        LOGGER.exception(
+                            "交易信号失败后重新读取状态失败，改用刷新开始时的状态"
+                        )
+                        fallback_trade_states = trade_signal_states
+                    fallback_active_trade_states = {
+                        canonical_symbol: state
+                        for canonical_symbol, state in fallback_trade_states.items()
+                        if state.status in {LONG, NO_ADD, REENTRY_COOLDOWN}
+                    }
+                    fallback_scan_result = scan_trade_conditions(
+                        snapshot,
+                        reference_snapshot,
+                        self.trade_kline_loader,
+                        fallback_active_trade_states,
+                    )
+                    for canonical_symbol, state in fallback_scan_result.state_updates:
+                        try:
+                            self.store.set_trade_signal_state(
+                                canonical_symbol, state
+                            )
+                        except Exception:
+                            LOGGER.exception(
+                                "交易信号失败后无法保存 %s 的风控检查点",
+                                canonical_symbol,
+                            )
                     snapshot["notification"] = {
                         "status": "partial",
                         "trade_signal_status": "error",
                         "message": f"交易信号失败：{type(error).__name__}: {error}",
-                        **_condition_scan_payload(
-                            scan_trade_conditions(
-                                snapshot, reference_snapshot, self.trade_kline_loader
-                            )
-                        ),
+                        **_condition_scan_payload(fallback_scan_result),
                     }
                 else:
                     if not snapshot["complete"]:

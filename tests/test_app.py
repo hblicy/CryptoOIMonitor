@@ -82,6 +82,9 @@ class FakeStore:
     def list_trade_signal_states(self):
         return dict(self.trade_states)
 
+    def set_trade_signal_state(self, symbol, state) -> None:
+        self.trade_states[symbol] = state
+
 class TradeSignalOnlyNotifier:
     def send(self, event, comparison) -> None:
         raise AssertionError("不应发送 OI 埋伏候选提醒")
@@ -137,6 +140,10 @@ class AppRefreshTests(unittest.TestCase):
         application = new_application()
         application.coordinator = FakeCoordinator()
         application.store = FakeStore()
+        application.store.trade_states = {
+            "PEPE": TradeSignalState(status=LONG),
+            "DOGE": TradeSignalState(status=REENTRY_COOLDOWN),
+        }
         application.notifier = None
         application.trade_kline_loader = object()
         application._lock = threading.Lock()
@@ -153,12 +160,91 @@ class AppRefreshTests(unittest.TestCase):
         with patch(
             "app.scan_trade_conditions",
             return_value=TradeConditionScanResult((scan,), ()),
-        ):
+        ) as scan_mock:
             snapshot = application.refresh()
 
+        scan_mock.assert_called_once_with(
+            snapshot,
+            None,
+            application.trade_kline_loader,
+            {
+                "PEPE": application.store.trade_states["PEPE"],
+                "DOGE": application.store.trade_states["DOGE"],
+            },
+        )
         self.assertEqual(snapshot["notification"]["status"], "not_configured")
         self.assertEqual(
             snapshot["notification"]["trade_condition_scans"], [scan.as_dict()]
+        )
+
+    def test_persists_scan_only_trailing_state_updates(self) -> None:
+        application = new_application()
+        application.coordinator = FakeCoordinator()
+        application.store = FakeStore()
+        initial_state = TradeSignalState(
+            status=LONG,
+            entry_price=100,
+            stop_loss=96,
+            entry_atr=2,
+            highest_close=100,
+            last_processed_candle_close_time=1,
+            binance_symbol="PEPEUSDT",
+        )
+        updated_state = TradeSignalState(
+            status=LONG,
+            entry_price=100,
+            stop_loss=98,
+            entry_atr=2,
+            highest_close=106,
+            last_processed_candle_close_time=2,
+            binance_symbol="PEPEUSDT",
+        )
+        application.store.trade_states = {"PEPE": initial_state}
+        application.notifier = None
+        application.trade_kline_loader = object()
+        application._lock = threading.Lock()
+
+        with patch(
+            "app.scan_trade_conditions",
+            return_value=TradeConditionScanResult(
+                (), (), (("PEPE", updated_state),)
+            ),
+        ):
+            application.refresh()
+
+        self.assertEqual(application.store.trade_states["PEPE"], updated_state)
+
+    def test_scan_state_write_failure_does_not_skip_later_symbols(self) -> None:
+        class FirstWriteFailsStore(FakeStore):
+            def set_trade_signal_state(self, symbol, state) -> None:
+                if symbol == "PEPE":
+                    raise RuntimeError("state write failed")
+                super().set_trade_signal_state(symbol, state)
+
+        application = new_application()
+        application.coordinator = FakeCoordinator()
+        application.store = FirstWriteFailsStore()
+        application.notifier = None
+        application.trade_kline_loader = object()
+        application._lock = threading.Lock()
+        pepe_state = TradeSignalState(status=REENTRY_COOLDOWN)
+        doge_state = TradeSignalState(status=REENTRY_COOLDOWN)
+
+        with patch(
+            "app.scan_trade_conditions",
+            return_value=TradeConditionScanResult(
+                (),
+                (),
+                (("PEPE", pepe_state), ("DOGE", doge_state)),
+            ),
+        ), self.assertLogs("crypto_oi_monitor", level="ERROR") as logs:
+            snapshot = application.refresh()
+
+        self.assertNotIn("PEPE", application.store.trade_states)
+        self.assertEqual(application.store.trade_states["DOGE"], doge_state)
+        self.assertEqual(snapshot["notification"]["status"], "not_configured")
+        self.assertTrue(
+            any("无法保存 PEPE 的风控检查点" in message for message in logs.output)
         )
 
     def test_skips_ambush_notifications_and_dispatches_trade_signals(self) -> None:
@@ -253,7 +339,11 @@ class AppRefreshTests(unittest.TestCase):
         application.trade_kline_loader = object()
         application._lock = threading.Lock()
 
-        application.refresh()
+        with patch(
+            "app.scan_trade_conditions",
+            return_value=TradeConditionScanResult((), ()),
+        ):
+            application.refresh()
 
         self.assertEqual(application.store.active_assets, {"PEPE", "DOGE", "OLD"})
 
@@ -281,6 +371,90 @@ class AppRefreshTests(unittest.TestCase):
         dispatch_list_mock.assert_not_called()
         self.assertIn("NEW", logs.output[0])
         json.dumps(snapshot)
+
+    def test_scans_active_trade_states_after_dispatch_failure(self) -> None:
+        application = new_application()
+        application.coordinator = FakeCoordinator()
+        application.store = FakeStore()
+        application.store.trade_states = {
+            "PEPE": TradeSignalState(status=NO_ADD),
+            "OLD": TradeSignalState(status=REENTRY_COOLDOWN),
+        }
+        application.notifier = object()
+        application.trade_kline_loader = object()
+        application._lock = threading.Lock()
+
+        doge_state = TradeSignalState(status=NO_ADD)
+        updated_doge_state = TradeSignalState(
+            status=NO_ADD,
+            entry_price=100,
+            stop_loss=98,
+            entry_atr=2,
+            highest_close=106,
+            last_processed_candle_close_time=2,
+            binance_symbol="DOGEUSDT",
+        )
+
+        def fail_after_state_change(*_args) -> None:
+            application.store.trade_states = {
+                "PEPE": TradeSignalState(status=REENTRY_COOLDOWN),
+                "DOGE": doge_state,
+            }
+            raise RuntimeError("dispatch failed")
+
+        with self.assertLogs("crypto_oi_monitor", level="ERROR"), patch(
+            "app.dispatch_trade_signals", side_effect=fail_after_state_change
+        ), patch(
+            "app.scan_trade_conditions",
+            return_value=TradeConditionScanResult(
+                (), (), (("DOGE", updated_doge_state),)
+            ),
+        ) as scan_mock:
+            snapshot = application.refresh()
+
+        scan_mock.assert_called_once_with(
+            snapshot,
+            None,
+            application.trade_kline_loader,
+            {
+                "PEPE": application.store.trade_states["PEPE"],
+                "DOGE": doge_state,
+            },
+        )
+        self.assertEqual(application.store.trade_states["DOGE"], updated_doge_state)
+        self.assertEqual(snapshot["notification"]["trade_signal_status"], "error")
+
+    def test_dispatch_failure_falls_back_to_initial_states_when_reread_fails(
+        self,
+    ) -> None:
+        application = new_application()
+        application.coordinator = FakeCoordinator(
+            {"complete": False, "comparisons": []}
+        )
+        application.store = FakeStore()
+        initial_state = TradeSignalState(status=NO_ADD)
+        application.notifier = object()
+        application.trade_kline_loader = object()
+        application._lock = threading.Lock()
+
+        with patch.object(
+            application.store,
+            "list_trade_signal_states",
+            side_effect=[{"PEPE": initial_state}, RuntimeError("database unavailable")],
+        ), self.assertLogs("crypto_oi_monitor", level="ERROR"), patch(
+            "app.dispatch_trade_signals", side_effect=RuntimeError("dispatch failed")
+        ), patch(
+            "app.scan_trade_conditions", return_value=TradeConditionScanResult((), ())
+        ) as scan_mock:
+            snapshot = application.refresh()
+
+        scan_mock.assert_called_once_with(
+            snapshot,
+            None,
+            application.trade_kline_loader,
+            {"PEPE": initial_state},
+        )
+        self.assertEqual(snapshot["notification"]["trade_signal_status"], "error")
 
     def test_exposes_trade_signal_details_to_the_web_summary(self) -> None:
         application = new_application(8_000_000)

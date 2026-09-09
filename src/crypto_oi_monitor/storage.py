@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import json
@@ -7,7 +8,7 @@ import logging
 import shutil
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .trade_dispatch import TradeConditionListState, TradeSignalState
 
@@ -34,8 +35,17 @@ class SnapshotStore:
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.database_path)
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS snapshots (
@@ -261,7 +271,7 @@ class SnapshotStore:
             connection.close()
 
     def load_latest_snapshot(self) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT payload FROM snapshots ORDER BY id DESC LIMIT 1"
             ).fetchone()
@@ -272,7 +282,7 @@ class SnapshotStore:
     ) -> dict[str, Any] | None:
         lower_bound = (target - tolerance).isoformat()
         upper_bound = (target + tolerance).isoformat()
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT captured_at, payload
@@ -299,7 +309,7 @@ class SnapshotStore:
         )[1]
 
     def get_alert_status(self, canonical_symbol: str) -> str | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT status FROM alert_states WHERE canonical_symbol = ?",
                 (canonical_symbol,),
@@ -307,7 +317,7 @@ class SnapshotStore:
         return None if row is None else str(row[0])
 
     def set_alert_status(self, canonical_symbol: str, status: str) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO alert_states (canonical_symbol, status)
@@ -320,7 +330,7 @@ class SnapshotStore:
     def get_trade_signal_state(
         self, canonical_symbol: str
     ) -> TradeSignalState | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT side, entry_price, stop_loss, cooldown_until_candle_close_time,
@@ -363,7 +373,7 @@ class SnapshotStore:
         return state
 
     def list_trade_signal_states(self) -> dict[str, TradeSignalState]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             symbols = [
                 str(row[0])
                 for row in connection.execute(
@@ -380,7 +390,7 @@ class SnapshotStore:
     def set_trade_signal_state(
         self, canonical_symbol: str, state: TradeSignalState
     ) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             self._set_trade_signal_state(connection, canonical_symbol, state)
 
     @staticmethod
@@ -429,14 +439,14 @@ class SnapshotStore:
         )
 
     def clear_trade_signal_state(self, canonical_symbol: str) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "DELETE FROM trade_signal_states WHERE canonical_symbol = ?",
                 (canonical_symbol,),
             )
 
     def notification_was_delivered(self, event_id: str) -> bool:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT 1 FROM notification_deliveries WHERE event_id = ?",
                 (event_id,),
@@ -444,7 +454,7 @@ class SnapshotStore:
         return row is not None
 
     def mark_notification_delivered(self, event_id: str) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO notification_deliveries (event_id, delivered_at)
@@ -457,7 +467,7 @@ class SnapshotStore:
     def mark_trade_notification_delivered(
         self, event_id: str, canonical_symbol: str, state: TradeSignalState
     ) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO notification_deliveries (
@@ -480,7 +490,7 @@ class SnapshotStore:
             )
 
     def mark_trade_notification_state_applied(self, event_id: str) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             exists = connection.execute(
                 "SELECT 1 FROM notification_deliveries WHERE event_id = ?",
                 (event_id,),
@@ -499,7 +509,7 @@ class SnapshotStore:
             )
 
     def apply_pending_trade_signal_states(self) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT event_id, canonical_symbol, trade_state_payload
@@ -529,7 +539,7 @@ class SnapshotStore:
             LOGGER.info("Applied %s pending trade signal state transitions", len(rows))
 
     def get_trade_condition_list_state(self) -> TradeConditionListState:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT can_long_symbols, stop_long_symbols, exit_long_symbols, last_sent_at
@@ -547,7 +557,7 @@ class SnapshotStore:
         )
 
     def set_trade_condition_list_state(self, state: TradeConditionListState) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO trade_condition_list_state (
@@ -568,7 +578,7 @@ class SnapshotStore:
             )
 
     def clear_states_outside(self, active_assets: set[str]) -> tuple[int, int]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             if not active_assets:
                 removed_alerts = connection.execute("DELETE FROM alert_states").rowcount
                 removed_trade_signals = connection.execute(

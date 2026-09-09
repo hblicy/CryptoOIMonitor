@@ -5,16 +5,20 @@ import { describe, expect, it } from "vitest";
 import { TradeConditionPanel } from "./App";
 
 describe("TradeConditionPanel", () => {
-  it("describes the relaxed three-candle breakout and volume rules", () => {
+  it("describes the same-bar breakout, ambush cap, and 2x volume rules", () => {
     const html = renderToStaticMarkup(
       <TradeConditionPanel complete={true} scans={[]} />,
     );
 
-    expect(html).toContain("最近3根内上穿 EMA200");
-    expect(html).toContain("前20根均量的1.1倍");
+    expect(html).toContain("扫描 OI / 市值 &gt; 90% 的标的");
+    expect(html).toContain("开多仅限不超过 200%");
+    expect(html).toContain("当根上穿 EMA200");
+    expect(html).toContain("前20根均量的2倍");
     expect(html).toContain("RSI 回升");
+    expect(html).not.toContain("OI / 市值 &gt; 90% 且不超过 200%");
     expect(html).not.toContain("RSI &lt; 60");
-    expect(html).not.toContain("价格校正 OI 增长；成交额突破前20根均量的1.2倍");
+    expect(html).not.toContain("最近3根内上穿 EMA200");
+    expect(html).not.toContain("前20根均量的1.1倍");
   });
 
   it("shows active risk results while new entries are paused", () => {
@@ -38,6 +42,29 @@ describe("TradeConditionPanel", () => {
     expect(html).toContain("\u5df2\u6709\u4ea4\u6613\u72b6\u6001\u7684 15m \u98ce\u63a7\u4ecd\u5728\u6267\u884c");
     expect(html).toContain("PEPE");
     expect(html).toContain("trade-signal-exit_long");
+  });
+
+  it("shows unavailable ambush-zone indicators as dashes instead of zeroes", () => {
+    const html = renderToStaticMarkup(
+      <TradeConditionPanel
+        complete={true}
+        scans={[{
+          status: "stop_long",
+          canonical_symbol: "PEPE",
+          candle_close_time: null,
+          rsi: null,
+          close: null,
+          ema200: null,
+          oi_to_market_cap: 2.01,
+          reasons: ["oi_to_market_cap_in_ambush_zone"],
+        }]}
+      />,
+    );
+
+    expect(html).toContain("<dt>RSI(14)</dt><dd>—</dd>");
+    expect(html).toContain("<dt>收盘价</dt><dd>—</dd>");
+    expect(html).toContain("<dt>EMA200</dt><dd>—</dd>");
+    expect(html).not.toContain("<dt>RSI(14)</dt><dd>0.00</dd>");
   });
 
   it("shows only one incomplete-source notice when no scans are available", () => {
