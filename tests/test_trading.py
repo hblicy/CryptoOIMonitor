@@ -83,7 +83,7 @@ class TradeSetupTests(unittest.TestCase):
             "previous_ema200": 100,
             "ema200_slope_reference": 99,
             "atr": 2,
-            "quote_volume": 120,
+            "quote_volume": 200,
             "previous_quote_volume": 100,
             "average_quote_volume": 90,
             "ema200_breakout_candles_ago": 0,
@@ -100,15 +100,20 @@ class TradeSetupTests(unittest.TestCase):
         self,
     ) -> None:
         indicators = self._valid_indicators(
-            quote_volume=111,
-            previous_quote_volume=200,
+            quote_volume=201,
+            previous_quote_volume=400,
             average_quote_volume=100,
         )
 
         self.assertEqual(entry_reasons(indicators), ())
 
-    def test_requires_ema200_crossover_within_three_closed_candles(self) -> None:
+    def test_requires_ema200_crossover_on_the_current_closed_candle(self) -> None:
         indicators = self._valid_indicators(ema200_breakout_candles_ago=None)
+
+        self.assertEqual(entry_reasons(indicators), ("ema200_not_crossed_up",))
+
+    def test_rejects_ema200_breakout_from_the_previous_closed_candle(self) -> None:
+        indicators = self._valid_indicators(ema200_breakout_candles_ago=1)
 
         self.assertEqual(entry_reasons(indicators), ("ema200_not_crossed_up",))
 
@@ -127,7 +132,7 @@ class TradeSetupTests(unittest.TestCase):
 
     def test_requires_quote_volume_to_break_twenty_candle_average(self) -> None:
         indicators = self._valid_indicators(
-            quote_volume=110,
+            quote_volume=200,
             previous_quote_volume=100,
             average_quote_volume=100,
         )
@@ -137,26 +142,23 @@ class TradeSetupTests(unittest.TestCase):
             ("quote_volume_not_above_average",),
         )
 
-    def test_accepts_ema200_breakout_from_two_closed_candles_ago(self) -> None:
+    def test_rejects_ema200_breakout_from_two_closed_candles_ago(self) -> None:
         closes = (
             [100] * 950
             + [100 + (index % 2) * 2 for index in range(45)]
             + [97, 98, 102, 102, 100, 100.5, 100.7, 100.9]
         )
-        candles = _candles(closes, [100] * (len(closes) - 1) + [111])
+        candles = _candles(closes, [100] * (len(closes) - 1) + [201])
 
-        signal = evaluate_trade_setup(candles)
+        self.assertIsNone(evaluate_trade_setup(candles))
 
-        self.assertIsNotNone(signal)
-        self.assertEqual(signal.entry_price, 100.9)
-
-    def test_rejects_ema200_breakout_older_than_three_closed_candles(self) -> None:
+    def test_rejects_ema200_breakout_older_than_the_current_closed_candle(self) -> None:
         closes = (
             [100] * 950
             + [100 + (index % 2) * 2 for index in range(45)]
             + [97, 98, 102, 102, 100, 100.5, 100.7, 100.8, 100.9]
         )
-        candles = _candles(closes, [100] * (len(closes) - 1) + [111])
+        candles = _candles(closes, [100] * (len(closes) - 1) + [201])
 
         self.assertIsNone(evaluate_trade_setup(candles))
 
@@ -249,7 +251,7 @@ class TradeSetupTests(unittest.TestCase):
             + [100 + (index % 2) * 2 for index in range(45)]
             + [97, 98, 102, 102, 100, 100.5]
         )
-        candles = _candles(closes, [100] * 1000 + [121])
+        candles = _candles(closes, [100] * 1000 + [201])
 
         signal = evaluate_trade_setup(candles)
 

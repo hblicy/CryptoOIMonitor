@@ -8,7 +8,10 @@ import json
 import logging
 from typing import Any, Callable, Protocol
 
-from .domain import TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO
+from .domain import (
+    AMBUSH_OI_TO_MARKET_CAP_RATIO,
+    TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO,
+)
 from .trading import (
     LONG,
     Candle,
@@ -172,6 +175,7 @@ class TradeSignalDispatchResult:
 class TradeConditionScanResult:
     scans: tuple[TradeConditionScan, ...]
     failures: tuple[TradeSignalDispatchFailure, ...]
+    state_updates: tuple[tuple[str, TradeSignalState], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -408,6 +412,7 @@ def dispatch_trade_signals(
         for comparison in snapshot["comparisons"]
     }
     state_failures: list[TradeSignalDispatchFailure] = []
+    state_failures_by_symbol: dict[str, TradeSignalDispatchFailure] = {}
     candidates: list[tuple[dict[str, Any], TradeSignalState | None]] = []
     for comparison in snapshot["comparisons"]:
         canonical_symbol = comparison["canonical_symbol"]
@@ -416,20 +421,32 @@ def dispatch_trade_signals(
             store.clear_trade_signal_state(canonical_symbol)
             persisted_states.pop(canonical_symbol, None)
             state = None
+        if state is not None:
+            comparison = _with_persisted_binance_contract(comparison, state)
+            state = _with_current_binance_symbol(comparison, state)
         ratio = comparison.get("oi_to_market_cap")
         if complete and (
-            (ratio is not None and ratio > TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO)
+            (
+                ratio is not None
+                and TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO
+                < ratio
+                <= AMBUSH_OI_TO_MARKET_CAP_RATIO
+            )
             or state is not None
         ):
             candidates.append((comparison, state))
-        elif not complete and state is not None and state.status in {LONG, NO_ADD}:
+        elif not complete and state is not None and state.status in {
+            LONG,
+            NO_ADD,
+            REENTRY_COOLDOWN,
+        }:
             candidates.append((comparison, state))
 
     for canonical_symbol, state in persisted_states.items():
         if (
             canonical_symbol in comparisons_by_symbol
             or state is None
-            or state.status not in {LONG, NO_ADD}
+            or state.status not in {LONG, NO_ADD, REENTRY_COOLDOWN}
         ):
             continue
         if state.binance_symbol is None:
@@ -439,26 +456,39 @@ def dispatch_trade_signals(
             )
             LOGGER.error("%s: %s", canonical_symbol, failure.message)
             state_failures.append(failure)
-            continue
+            state_failures_by_symbol[canonical_symbol] = failure
         candidates.append(
             (
                 {
                     "canonical_symbol": canonical_symbol,
                     "total_oi_usd": None,
                     "oi_to_market_cap": None,
-                    "contracts": [
-                        {"venue": "Binance", "symbol": state.binance_symbol}
-                    ],
+                    "contracts": (
+                        []
+                        if state.binance_symbol is None
+                        else [{"venue": "Binance", "symbol": state.binance_symbol}]
+                    ),
                 },
                 state,
             )
         )
 
-    candidate_comparisons = [comparison for comparison, _state in candidates]
+    candidate_comparisons = [
+        comparison
+        for comparison, state in candidates
+        if comparison["canonical_symbol"] not in state_failures_by_symbol
+        and (
+            comparison.get("oi_to_market_cap") is None
+            or comparison["oi_to_market_cap"] <= AMBUSH_OI_TO_MARKET_CAP_RATIO
+            or state is not None
+            and state.status in {LONG, NO_ADD, REENTRY_COOLDOWN}
+        )
+    ]
     candles_by_symbol, failures, failures_by_symbol = _load_trade_candles(
         candidate_comparisons, kline_loader
     )
     failures = state_failures + failures
+    failures_by_symbol = {**state_failures_by_symbol, **failures_by_symbol}
     scan_by_symbol: dict[str, TradeConditionScan] = {}
     scan_order: list[str] = []
 
@@ -491,6 +521,11 @@ def dispatch_trade_signals(
             reference_oi,
             candles_by_symbol,
             failures_by_symbol,
+            {
+                symbol
+                for symbol, state in persisted_states.items()
+                if state is not None and state.status in {LONG, NO_ADD}
+            },
         ):
             set_scan(scan)
 
@@ -499,26 +534,26 @@ def dispatch_trade_signals(
     for comparison, state in candidates:
         canonical_symbol = comparison["canonical_symbol"]
         ratio = comparison.get("oi_to_market_cap")
-        binance_symbol = _binance_symbol(comparison)
         replay_candles = candles_by_symbol.get(canonical_symbol)
         if replay_candles is None:
+            if state is not None and state != persisted_states.get(canonical_symbol):
+                try:
+                    store.set_trade_signal_state(canonical_symbol, state)
+                except Exception as error:
+                    record_candidate_failure(canonical_symbol, error)
+            stop_reasons = _kline_independent_stop_reasons(comparison, complete)
             if (
-                complete
-                and state is not None
+                state is not None
                 and state.status == LONG
-                and ratio is not None
-                and ratio <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO
+                and stop_reasons
             ):
-                reasons = ("oi_to_market_cap_not_above_90",)
                 set_scan(
                     _state_condition_scan(
-                        comparison, None, STOP_LONG, reasons
+                        comparison, None, STOP_LONG, stop_reasons
                     )
                 )
                 try:
-                    next_state = replace(
-                        state, status=NO_ADD, binance_symbol=binance_symbol
-                    )
+                    next_state = replace(state, status=NO_ADD)
                     store.set_trade_signal_state(
                         canonical_symbol,
                         next_state,
@@ -536,7 +571,7 @@ def dispatch_trade_signals(
                         None,
                         None,
                         ratio,
-                        reasons=reasons,
+                        reasons=stop_reasons,
                     )
                 )
             elif state is not None and canonical_symbol in failures_by_symbol:
@@ -554,8 +589,10 @@ def dispatch_trade_signals(
                     )
                 )
             continue
+        binance_symbol = _binance_symbol(comparison)
         candles = replay_candles[-REQUIRED_CLOSED_CANDLES:]
         indicators = trade_indicators(candles)
+        original_state = persisted_states.get(canonical_symbol)
         cooldown_entry_floor: int | None = None
         if state is not None and state.status == REENTRY_COOLDOWN:
             if (
@@ -571,12 +608,16 @@ def dispatch_trade_signals(
                         ("reentry_cooldown_active",),
                     )
                 )
+                if state != original_state:
+                    try:
+                        store.set_trade_signal_state(canonical_symbol, state)
+                    except Exception as error:
+                        record_candidate_failure(canonical_symbol, error)
                 continue
             cooldown_entry_floor = state.cooldown_until_candle_close_time
         if state is not None:
-            original_state = state
-            if state.binance_symbol != binance_symbol:
-                state = replace(state, binance_symbol=binance_symbol)
+            assert original_state is not None
+            normalized_pre_replay_state = state
             if (
                 state.entry_price is not None
                 and state.stop_loss is not None
@@ -598,6 +639,43 @@ def dispatch_trade_signals(
                     )
                     failures.append(failure)
                     failures_by_symbol[canonical_symbol] = failure
+                    stop_reasons = _kline_independent_stop_reasons(
+                        comparison, complete
+                    )
+                    if state.status == LONG and stop_reasons:
+                        set_scan(
+                            _state_condition_scan(
+                                comparison,
+                                None,
+                                STOP_LONG,
+                                stop_reasons,
+                            )
+                        )
+                        try:
+                            next_state = replace(state, status=NO_ADD)
+                            store.set_trade_signal_state(
+                                canonical_symbol,
+                                next_state,
+                            )
+                        except Exception as state_error:
+                            record_candidate_failure(
+                                canonical_symbol, state_error
+                            )
+                            continue
+                        dispatched.append(STOP_LONG)
+                        details.append(
+                            TradeSignalEvent(
+                                STOP_LONG,
+                                canonical_symbol,
+                                None,
+                                None,
+                                None,
+                                None,
+                                ratio,
+                                reasons=stop_reasons,
+                            )
+                        )
+                        continue
                     set_scan(
                         TradeConditionScan(
                             KLINE_ERROR,
@@ -611,6 +689,11 @@ def dispatch_trade_signals(
                             error=failure.message,
                         )
                     )
+                    if state != original_state:
+                        try:
+                            store.set_trade_signal_state(canonical_symbol, state)
+                        except Exception as state_error:
+                            record_candidate_failure(canonical_symbol, state_error)
                     continue
                 if state.stop_loss > original_state.stop_loss:
                     LOGGER.info(
@@ -645,6 +728,14 @@ def dispatch_trade_signals(
                     cooldown_candles,
                     canonical_symbol,
                 )
+                if normalized_pre_replay_state != original_state:
+                    try:
+                        store.set_trade_signal_state(
+                            canonical_symbol,
+                            normalized_pre_replay_state,
+                        )
+                    except Exception as error:
+                        record_candidate_failure(canonical_symbol, error)
                 set_scan(
                     _state_condition_scan(
                         comparison,
@@ -746,12 +837,9 @@ def dispatch_trade_signals(
                         )
                     )
                 continue
-            if (
-                complete
-                and ratio is not None
-                and ratio <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO
-            ):
-                reasons = ("oi_to_market_cap_not_above_90",)
+            ratio_reasons = _oi_ratio_trade_reasons(ratio)
+            if complete and ratio_reasons:
+                reasons = ratio_reasons
                 set_scan(
                     _state_condition_scan(
                         comparison, indicators, STOP_LONG, reasons
@@ -873,7 +961,7 @@ def dispatch_trade_signals(
             if not complete:
                 continue
             signal_event_type = LONG
-        if ratio is None or ratio <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO:
+        if ratio is None or _oi_ratio_trade_reasons(ratio):
             continue
         if _aggregate_oi_entry_reasons(comparison, reference_oi, indicators):
             continue
@@ -1076,25 +1164,202 @@ def scan_trade_conditions(
     snapshot: dict[str, Any],
     reference_snapshot: dict[str, Any] | None,
     kline_loader: Callable[[str], list[Candle]],
+    trade_signal_states: dict[str, TradeSignalState | str] | None = None,
 ) -> TradeConditionScanResult:
-    if not snapshot["complete"]:
-        return TradeConditionScanResult((), ())
-
-    comparisons = [
-        comparison
+    complete = snapshot["complete"] is True
+    persisted_states = {
+        symbol: _as_trade_signal_state(state)
+        for symbol, state in (trade_signal_states or {}).items()
+    }
+    active_states = {
+        symbol: state
+        for symbol, state in persisted_states.items()
+        if state is not None and state.status in {LONG, NO_ADD, REENTRY_COOLDOWN}
+    }
+    current_comparisons = {
+        comparison["canonical_symbol"]: comparison
         for comparison in snapshot["comparisons"]
-        if comparison["oi_to_market_cap"] > TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO
+    }
+    state_failures: list[TradeSignalDispatchFailure] = []
+    failures_by_symbol: dict[str, TradeSignalDispatchFailure] = {}
+    for canonical_symbol, state in active_states.items():
+        comparison = current_comparisons.get(canonical_symbol)
+        if comparison is None:
+            continue
+        comparison_with_binance = _with_persisted_binance_contract(
+            comparison, state
+        )
+        if not any(
+            contract["venue"] == "Binance"
+            for contract in comparison_with_binance.get("contracts", [])
+        ):
+            failure = TradeSignalDispatchFailure(
+                canonical_symbol,
+                "Persisted Binance symbol is missing for active risk checks",
+            )
+            state_failures.append(failure)
+            failures_by_symbol[canonical_symbol] = failure
+            continue
+        current_comparisons[canonical_symbol] = comparison_with_binance
+        active_states[canonical_symbol] = _with_current_binance_symbol(
+            comparison_with_binance, state
+        )
+    comparisons: list[dict[str, Any]] = []
+    included_symbols: set[str] = set()
+    if complete:
+        for comparison in current_comparisons.values():
+            ratio = comparison.get("oi_to_market_cap")
+            if ratio is None or ratio <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO:
+                continue
+            comparisons.append(comparison)
+            included_symbols.add(comparison["canonical_symbol"])
+
+    for canonical_symbol, state in active_states.items():
+        if canonical_symbol in included_symbols:
+            continue
+        comparison = current_comparisons.get(canonical_symbol)
+        if comparison is None:
+            comparison = {
+                "canonical_symbol": canonical_symbol,
+                "total_oi_usd": None,
+                "oi_to_market_cap": None,
+                "contracts": (
+                    []
+                    if state.binance_symbol is None
+                    else [{"venue": "Binance", "symbol": state.binance_symbol}]
+                ),
+            }
+            if state.binance_symbol is None:
+                failure = TradeSignalDispatchFailure(
+                    canonical_symbol,
+                    "Persisted Binance symbol is missing for active risk checks",
+                )
+                state_failures.append(failure)
+                failures_by_symbol[canonical_symbol] = failure
+        comparisons.append(comparison)
+        included_symbols.add(canonical_symbol)
+
+    kline_comparisons = [
+        comparison
+        for comparison in comparisons
+        if comparison["canonical_symbol"] not in failures_by_symbol
+        and (
+            comparison["canonical_symbol"] in active_states
+            or comparison["oi_to_market_cap"] <= AMBUSH_OI_TO_MARKET_CAP_RATIO
+        )
     ]
-    candles_by_symbol, failures, failures_by_symbol = _load_trade_candles(
-        comparisons, kline_loader
+    candles_by_symbol, load_failures, load_failures_by_symbol = _load_trade_candles(
+        kline_comparisons, kline_loader
     )
-    scans = _build_trade_condition_scans(
-        comparisons,
-        _reference_oi_by_symbol(reference_snapshot),
-        candles_by_symbol,
-        failures_by_symbol,
+    failures = state_failures + load_failures
+    failures_by_symbol.update(load_failures_by_symbol)
+    reference_oi = _reference_oi_by_symbol(reference_snapshot)
+    scans: list[TradeConditionScan] = []
+    state_updates: list[tuple[str, TradeSignalState]] = []
+    for comparison in comparisons:
+        canonical_symbol = comparison["canonical_symbol"]
+        state = active_states.get(canonical_symbol)
+        ratio = comparison.get("oi_to_market_cap")
+        if (
+            state is None
+            and ratio is not None
+            and ratio > AMBUSH_OI_TO_MARKET_CAP_RATIO
+        ):
+            scans.append(
+                _state_condition_scan(
+                    comparison,
+                    None,
+                    STOP_LONG,
+                    _oi_ratio_trade_reasons(ratio),
+                )
+            )
+            continue
+        candles = candles_by_symbol.get(canonical_symbol)
+        if candles is None:
+            failure = failures_by_symbol[canonical_symbol]
+            stop_reasons = _kline_independent_stop_reasons(comparison, complete)
+            if state is not None and state.status == LONG and stop_reasons:
+                updated_state = replace(state, status=NO_ADD)
+                if updated_state != persisted_states.get(canonical_symbol):
+                    state_updates.append((canonical_symbol, updated_state))
+                scans.append(
+                    _state_condition_scan(
+                        comparison,
+                        None,
+                        STOP_LONG,
+                        stop_reasons,
+                    )
+                )
+                continue
+            if state is not None and state != persisted_states.get(canonical_symbol):
+                state_updates.append((canonical_symbol, state))
+            scans.append(
+                TradeConditionScan(
+                    status=KLINE_ERROR,
+                    canonical_symbol=canonical_symbol,
+                    candle_close_time=None,
+                    rsi=None,
+                    close=None,
+                    ema200=None,
+                    oi_to_market_cap=ratio,
+                    aggregate_oi_usd=comparison.get("total_oi_usd"),
+                    previous_aggregate_oi_usd=reference_oi.get(canonical_symbol),
+                    error=failure.message,
+                )
+            )
+            continue
+        if state is None:
+            scans.append(_scan_trade_condition(comparison, reference_oi, candles))
+            continue
+        try:
+            scan, updated_state = _scan_active_trade_condition(
+                comparison,
+                reference_oi,
+                candles,
+                state,
+                complete,
+            )
+            scans.append(scan)
+            if updated_state != persisted_states.get(canonical_symbol):
+                state_updates.append((canonical_symbol, updated_state))
+        except Exception as error:
+            failure = TradeSignalDispatchFailure(
+                canonical_symbol, f"{type(error).__name__}: {error}"
+            )
+            failures.append(failure)
+            stop_reasons = _kline_independent_stop_reasons(comparison, complete)
+            if state.status == LONG and stop_reasons:
+                updated_state = replace(state, status=NO_ADD)
+                if updated_state != persisted_states.get(canonical_symbol):
+                    state_updates.append((canonical_symbol, updated_state))
+                scans.append(
+                    _state_condition_scan(
+                        comparison,
+                        None,
+                        STOP_LONG,
+                        stop_reasons,
+                    )
+                )
+                continue
+            if state != persisted_states.get(canonical_symbol):
+                state_updates.append((canonical_symbol, state))
+            scans.append(
+                TradeConditionScan(
+                    status=KLINE_ERROR,
+                    canonical_symbol=canonical_symbol,
+                    candle_close_time=None,
+                    rsi=None,
+                    close=None,
+                    ema200=None,
+                    oi_to_market_cap=ratio,
+                    aggregate_oi_usd=comparison.get("total_oi_usd"),
+                    previous_aggregate_oi_usd=reference_oi.get(canonical_symbol),
+                    error=failure.message,
+                )
+            )
+    return TradeConditionScanResult(
+        tuple(scans), tuple(failures), tuple(state_updates)
     )
-    return TradeConditionScanResult(tuple(scans), tuple(failures))
 
 
 def _load_trade_candles(
@@ -1113,10 +1378,22 @@ def _load_trade_candles(
     with ThreadPoolExecutor(
         max_workers=min(MAX_KLINE_WORKERS, len(comparisons))
     ) as executor:
-        futures = [
-            (comparison, executor.submit(kline_loader, _binance_symbol(comparison)))
-            for comparison in comparisons
-        ]
+        futures = []
+        for comparison in comparisons:
+            canonical_symbol = comparison["canonical_symbol"]
+            try:
+                binance_symbol = _binance_symbol(comparison)
+            except Exception as error:
+                failure = TradeSignalDispatchFailure(
+                    canonical_symbol,
+                    f"{type(error).__name__}: {error}",
+                )
+                failures.append(failure)
+                failures_by_symbol[canonical_symbol] = failure
+                continue
+            futures.append(
+                (comparison, executor.submit(kline_loader, binance_symbol))
+            )
         for comparison, future in futures:
             canonical_symbol = comparison["canonical_symbol"]
             try:
@@ -1147,12 +1424,27 @@ def _build_trade_condition_scans(
     reference_oi: dict[str, float],
     candles_by_symbol: dict[str, list[Candle]],
     failures_by_symbol: dict[str, TradeSignalDispatchFailure],
+    active_trade_symbols: set[str],
 ) -> list[TradeConditionScan]:
     scans: list[TradeConditionScan] = []
     for comparison in comparisons:
-        if comparison["oi_to_market_cap"] <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO:
-            continue
         canonical_symbol = comparison["canonical_symbol"]
+        ratio = comparison["oi_to_market_cap"]
+        if ratio <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO:
+            continue
+        if (
+            ratio > AMBUSH_OI_TO_MARKET_CAP_RATIO
+            and canonical_symbol not in active_trade_symbols
+        ):
+            scans.append(
+                _state_condition_scan(
+                    comparison,
+                    None,
+                    STOP_LONG,
+                    _oi_ratio_trade_reasons(ratio),
+                )
+            )
+            continue
         candles = candles_by_symbol.get(canonical_symbol)
         if candles is None:
             failure = failures_by_symbol[canonical_symbol]
@@ -1184,6 +1476,37 @@ def _binance_symbol(comparison: dict[str, Any]) -> str:
     )
 
 
+def _with_persisted_binance_contract(
+    comparison: dict[str, Any], state: TradeSignalState
+) -> dict[str, Any]:
+    if state.binance_symbol is None or any(
+        contract["venue"] == "Binance"
+        for contract in comparison.get("contracts", [])
+    ):
+        return comparison
+    return {
+        **comparison,
+        "contracts": [
+            *comparison.get("contracts", []),
+            {"venue": "Binance", "symbol": state.binance_symbol},
+        ],
+    }
+
+
+def _with_current_binance_symbol(
+    comparison: dict[str, Any], state: TradeSignalState
+) -> TradeSignalState:
+    try:
+        binance_symbol = _binance_symbol(comparison)
+    except ValueError:
+        return state
+    return (
+        state
+        if state.binance_symbol == binance_symbol
+        else replace(state, binance_symbol=binance_symbol)
+    )
+
+
 def _as_trade_signal_state(
     state: TradeSignalState | str | None,
 ) -> TradeSignalState | None:
@@ -1194,6 +1517,162 @@ def _as_trade_signal_state(
     raise TypeError(f"Unsupported trade signal state: {type(state).__name__}")
 
 
+def _scan_active_trade_condition(
+    comparison: dict[str, Any],
+    reference_oi: dict[str, float],
+    replay_candles: list[Candle],
+    state: TradeSignalState,
+    complete: bool,
+) -> tuple[TradeConditionScan, TradeSignalState]:
+    candles = replay_candles[-REQUIRED_CLOSED_CANDLES:]
+    indicators = trade_indicators(candles)
+    normalized_state = _with_current_binance_symbol(comparison, state)
+    if normalized_state.status == REENTRY_COOLDOWN:
+        cooldown_until = normalized_state.cooldown_until_candle_close_time
+        if (
+            cooldown_until is not None
+            and indicators.candle_close_time < cooldown_until
+        ):
+            return (
+                _state_condition_scan(
+                    comparison,
+                    indicators,
+                    STOP_LONG,
+                    ("reentry_cooldown_active",),
+                ),
+                normalized_state,
+            )
+        if (
+            not complete
+            or comparison.get("oi_to_market_cap") is None
+            or comparison.get("total_oi_usd") is None
+        ):
+            return (
+                _state_condition_scan(
+                    comparison,
+                    indicators,
+                    STOP_LONG,
+                    ("data_source_incomplete",),
+                ),
+                normalized_state,
+            )
+        reasons = _oi_ratio_trade_reasons(comparison["oi_to_market_cap"])
+        reasons += _aggregate_oi_entry_reasons(
+            comparison, reference_oi, indicators
+        )
+        reasons += entry_reasons(indicators)
+        if (
+            cooldown_until is not None
+            and indicators.ema200_breakout_candles_ago is not None
+            and indicators.candle_close_time
+            - indicators.ema200_breakout_candles_ago
+            * FIFTEEN_MINUTES_MILLISECONDS
+            < cooldown_until
+        ):
+            reasons += ("ema200_breakout_before_cooldown_end",)
+        return (
+            _state_condition_scan(
+                comparison,
+                indicators,
+                STOP_LONG if reasons else CAN_LONG,
+                reasons,
+            ),
+            normalized_state,
+        )
+
+    replayed_state = normalized_state
+    if (
+        normalized_state.entry_price is not None
+        and normalized_state.stop_loss is not None
+        and normalized_state.entry_atr is not None
+        and normalized_state.highest_close is not None
+    ):
+        (
+            replayed_state,
+            exit_indicators,
+            forced_exit_reasons,
+            _,
+        ) = _replay_active_position(
+            comparison["canonical_symbol"], replay_candles, normalized_state
+        )
+    else:
+        forced_exit_reasons = (
+            exit_reasons(
+                candles,
+                indicators,
+                normalized_state.stop_loss,
+                normalized_state.entry_price,
+            )
+            if normalized_state.stop_loss is not None
+            else ()
+        )
+        exit_indicators = indicators if forced_exit_reasons else None
+    if forced_exit_reasons:
+        assert exit_indicators is not None
+        return (
+            _state_condition_scan(
+                comparison,
+                exit_indicators,
+                EXIT_LONG,
+                forced_exit_reasons,
+            ),
+            normalized_state,
+        )
+    if (
+        not complete
+        or comparison.get("oi_to_market_cap") is None
+        or comparison.get("total_oi_usd") is None
+    ):
+        next_state = replayed_state
+        if complete and replayed_state.status == LONG:
+            next_state = replace(replayed_state, status=NO_ADD)
+        return (
+            _state_condition_scan(
+                comparison,
+                indicators,
+                STOP_LONG,
+                ("data_source_incomplete",),
+            ),
+            next_state,
+        )
+    ratio_reasons = _oi_ratio_trade_reasons(comparison["oi_to_market_cap"])
+    if ratio_reasons:
+        next_state = (
+            replace(replayed_state, status=NO_ADD)
+            if replayed_state.status == LONG
+            else replayed_state
+        )
+        return (
+            _state_condition_scan(
+                comparison,
+                indicators,
+                STOP_LONG,
+                ratio_reasons,
+            ),
+            next_state,
+        )
+    if replayed_state.status == LONG:
+        reasons = stop_long_reasons(indicators)
+    else:
+        reasons = _aggregate_oi_entry_reasons(
+            comparison, reference_oi, indicators
+        ) + entry_reasons(indicators)
+    next_state = (
+        replace(replayed_state, status=NO_ADD)
+        if replayed_state.status == LONG and reasons
+        else replayed_state
+    )
+    return (
+        _state_condition_scan(
+            comparison,
+            indicators,
+            STOP_LONG if reasons else CAN_LONG,
+            reasons,
+        ),
+        next_state,
+    )
+
+
 def _scan_trade_condition(
     comparison: dict[str, Any],
     reference_oi: dict[str, float],
@@ -1201,18 +1680,14 @@ def _scan_trade_condition(
 ) -> TradeConditionScan:
     candles = candles[-REQUIRED_CLOSED_CANDLES:]
     indicators = trade_indicators(candles)
-    forced_exit_reasons = exit_reasons(candles, indicators, None)
-    reasons = forced_exit_reasons or (
-        _aggregate_oi_entry_reasons(comparison, reference_oi, indicators)
+    reasons = (
+        _oi_ratio_trade_reasons(comparison.get("oi_to_market_cap"))
+        + _aggregate_oi_entry_reasons(comparison, reference_oi, indicators)
         + entry_reasons(indicators)
     )
     return TradeConditionScan(
         status=(
-            EXIT_LONG
-            if forced_exit_reasons
-            else CAN_LONG
-            if not reasons
-            else STOP_LONG
+            CAN_LONG if not reasons else STOP_LONG
         ),
         canonical_symbol=comparison["canonical_symbol"],
         candle_close_time=indicators.candle_close_time,
@@ -1300,6 +1775,29 @@ def _reference_oi_by_symbol(
         comparison["canonical_symbol"]: float(comparison["total_oi_usd"])
         for comparison in reference_snapshot["comparisons"]
     }
+
+
+def _oi_ratio_trade_reasons(ratio: float | None) -> tuple[str, ...]:
+    if ratio is None:
+        return ()
+    if ratio <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO:
+        return ("oi_to_market_cap_not_above_90",)
+    if ratio > AMBUSH_OI_TO_MARKET_CAP_RATIO:
+        return ("oi_to_market_cap_in_ambush_zone",)
+    return ()
+
+
+def _kline_independent_stop_reasons(
+    comparison: dict[str, Any], complete: bool
+) -> tuple[str, ...]:
+    if not complete:
+        return ()
+    if (
+        comparison.get("oi_to_market_cap") is None
+        or comparison.get("total_oi_usd") is None
+    ):
+        return ("data_source_incomplete",)
+    return _oi_ratio_trade_reasons(comparison["oi_to_market_cap"])
 
 
 def _aggregate_oi_entry_reasons(

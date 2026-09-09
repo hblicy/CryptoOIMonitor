@@ -14,9 +14,9 @@ REQUIRED_CLOSED_CANDLES = EMA_WARMUP_CANDLES + 1
 BINANCE_KLINE_FETCH_LIMIT = 1500
 FIFTEEN_MINUTES_MILLISECONDS = 15 * 60 * 1000
 EMA_SLOPE_LOOKBACK = 5
-EMA_BREAKOUT_LOOKBACK = 3
+EMA_BREAKOUT_LOOKBACK = 1
 VOLUME_AVERAGE_PERIOD = 20
-VOLUME_BREAKOUT_MULTIPLIER = 1.1
+VOLUME_BREAKOUT_MULTIPLIER = 2.0
 EXIT_EMA_ATR_BUFFER = 0.5
 TRAILING_ACTIVATION_ATR = 3
 TRAILING_PROFIT_FLOOR_ATR = 1
@@ -184,6 +184,7 @@ def entry_reasons(indicators: TradeIndicators) -> tuple[str, ...]:
     reasons = []
     if (
         indicators.ema200_breakout_candles_ago is None
+        or indicators.ema200_breakout_candles_ago >= EMA_BREAKOUT_LOOKBACK
         or indicators.close <= indicators.ema200
     ):
         reasons.append("ema200_not_crossed_up")

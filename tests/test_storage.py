@@ -10,7 +10,47 @@ from crypto_oi_monitor.storage import SnapshotStore
 from crypto_oi_monitor.trade_dispatch import TradeConditionListState, TradeSignalState
 
 
+class TrackingConnection(sqlite3.Connection):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        super().close()
+
+
 class SnapshotStoreTests(unittest.TestCase):
+    def test_connection_commits_and_closes_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "monitor.db"
+            store = SnapshotStore(database_path)
+            connection = sqlite3.connect(database_path, factory=TrackingConnection)
+
+            with patch.object(store, "_connect", return_value=connection):
+                store.set_alert_status("ETH", "high_risk")
+
+            self.assertEqual(connection.close_calls, 1)
+            self.assertEqual(store.get_alert_status("ETH"), "high_risk")
+
+    def test_connection_rolls_back_and_closes_after_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "monitor.db"
+            store = SnapshotStore(database_path)
+            connection = sqlite3.connect(database_path, factory=TrackingConnection)
+
+            with patch.object(store, "_connect", return_value=connection):
+                with self.assertRaisesRegex(RuntimeError, "write failed"):
+                    with store._connection() as managed_connection:
+                        managed_connection.execute(
+                            "INSERT INTO alert_states (canonical_symbol, status) VALUES (?, ?)",
+                            ("ETH", "high_risk"),
+                        )
+                        raise RuntimeError("write failed")
+
+            self.assertEqual(connection.close_calls, 1)
+            self.assertIsNone(store.get_alert_status("ETH"))
+
     def test_rejects_non_standard_json_numbers_in_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = SnapshotStore(Path(temp_dir) / "monitor.db")
