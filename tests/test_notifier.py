@@ -159,7 +159,7 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertIn("OI / 市值 > 90%", content)
         self.assertIn("当根已收盘 15m K 线上穿 EMA200", content)
         self.assertIn("前20根均量的2倍", content)
-        self.assertIn("且不超过 200%", content)
+        self.assertNotIn("不超过 200%", content)
         self.assertIn("RSI(14) 回升", content)
         self.assertNotIn("RSI(14) 低于60", content)
         self.assertNotIn("成交额较上一根增加", content)
