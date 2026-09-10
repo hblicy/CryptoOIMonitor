@@ -1244,6 +1244,7 @@ def scan_trade_conditions(
     for comparison in comparisons:
         canonical_symbol = comparison["canonical_symbol"]
         state = active_states.get(canonical_symbol)
+        ratio = comparison.get("oi_to_market_cap")
         candles = candles_by_symbol.get(canonical_symbol)
         if candles is None:
             failure = failures_by_symbol[canonical_symbol]

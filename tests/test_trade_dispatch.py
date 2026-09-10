@@ -2453,7 +2453,7 @@ class TradeDispatchTests(unittest.TestCase):
                 },
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.6,
+                    "oi_to_market_cap": 2.5,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -2471,6 +2471,10 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(
             {scan.canonical_symbol: scan.status for scan in result.scans},
             {"BAD": "kline_error", "PEPE": CAN_LONG},
+        )
+        self.assertEqual(
+            {scan.canonical_symbol: scan.oi_to_market_cap for scan in result.scans},
+            {"BAD": 1.6, "PEPE": 2.5},
         )
 
     def test_records_scan_kline_failure_without_a_notifier_or_signal_state(self) -> None:
