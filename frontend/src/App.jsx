@@ -62,7 +62,7 @@ export function tradeSignalReason(reason) {
   if (reason === "rsi_not_below_60") return "RSI(14) 未低于 60";
   if (reason === "rsi_not_rising") return "RSI(14) 未回升";
   if (reason === "oi_to_market_cap_not_above_90") return "OI / 市值未高于 90%";
-  if (reason === "oi_to_market_cap_in_ambush_zone") return "OI / 市值已高于 200%，禁止开多";
+  if (reason === "oi_to_market_cap_in_ambush_zone") return "历史规则：OI / 市值高于 200%";
   if (reason === "close_below_ema200") return "15m 收盘价低于 EMA200";
   if (reason === "reentry_cooldown_active") return "仍处于必须退出后的动态冷却期";
   if (reason === "data_source_incomplete") return "数据源不完整，暂停新开仓";
@@ -329,7 +329,7 @@ export function TradeConditionPanel({ scans, complete }) {
     <section className="trade-signal-panel" aria-label="交易条件扫描">
       <header className="trade-signal-heading">
         <strong>交易条件扫描</strong>
-        <span>扫描 OI / 市值 &gt; 90% 的标的；开多仅限不超过 200%；当根上穿 EMA200、当前仍在其上方且 EMA200 向上；价格校正 OI 增长；成交额突破前20根均量的2倍；RSI 回升</span>
+        <span>扫描 OI / 市值 &gt; 90% 的标的；当根上穿 EMA200、当前仍在其上方且 EMA200 向上；价格校正 OI 增长；成交额突破前20根均量的2倍；RSI 回升</span>
       </header>
       {!complete && <p className="trade-signal-empty">数据源不完整：已暂停新开仓，已有交易状态的 15m 风控仍在执行。</p>}
       {!scans.length

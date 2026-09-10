@@ -1170,7 +1170,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(loaded_symbols, ["PEPEUSDT"])
         self.assertEqual(recovered.events, (EXIT_LONG,))
 
-    def test_dispatch_stops_active_long_when_oi_is_blocked_during_a_replay_gap(
+    def test_dispatch_preserves_active_long_above_two_times_market_cap_during_a_replay_gap(
         self,
     ) -> None:
         store = MemoryStore()
@@ -1210,14 +1210,10 @@ class TradeDispatchTests(unittest.TestCase):
             snapshot, lambda _: gap_candles, store, notifier
         )
 
-        self.assertEqual(result.events, (STOP_LONG,))
+        self.assertEqual(result.events, ())
         self.assertIn("trailing replay gap", result.failures[0].message)
-        self.assertEqual(result.scans[0].status, STOP_LONG)
-        self.assertEqual(
-            result.scans[0].reasons,
-            ("oi_to_market_cap_in_ambush_zone",),
-        )
-        self.assertEqual(store.states["PEPE"], replace(state, status=NO_ADD))
+        self.assertEqual(result.scans[0].status, "kline_error")
+        self.assertEqual(store.states["PEPE"], state)
         self.assertEqual(notifier.stop_longs, [])
 
     def test_incomplete_snapshot_backfills_active_cooldown_binance_symbol(
@@ -1572,6 +1568,40 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.events, ())
         self.assertIn("WeCom failed", result.failures[0].message)
 
+    def test_resumes_no_add_above_two_times_market_cap(self) -> None:
+        store = MemoryStore()
+        notifier = RecordingNotifier()
+        candles = _second_long_setup_candles()
+        store.states["PEPE"] = TradeSignalState(
+            status=NO_ADD,
+            entry_price=100.5,
+            stop_loss=90,
+            entry_atr=1,
+            highest_close=100.5,
+            last_processed_candle_close_time=candles[-1].close_time,
+        )
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 2.01,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        result = dispatch_trade_signals(
+            snapshot,
+            lambda _: candles,
+            store,
+            notifier,
+        )
+
+        self.assertEqual(result.events, (RESUME_LONG,))
+        self.assertEqual(store.get_trade_signal_state("PEPE").status, "long")
+
     def test_requires_oi_to_market_cap_strictly_above_90_percent(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()
@@ -1591,7 +1621,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.events, ())
         self.assertEqual(notifier.signals, [])
 
-    def test_does_not_enter_long_in_ambush_zone(self) -> None:
+    def test_enters_long_above_two_times_market_cap(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()
         loaded_symbols = []
@@ -1614,15 +1644,38 @@ class TradeDispatchTests(unittest.TestCase):
             notifier,
         )
 
+        self.assertEqual(result.events, ("long",))
+        self.assertEqual(loaded_symbols, ["PEPEUSDT"])
+        self.assertEqual(store.get_trade_signal_state("PEPE").status, "long")
+        self.assertEqual(result.scans[0].status, CAN_LONG)
+        self.assertEqual(result.scans[0].reasons, ())
+
+    def test_high_oi_ratio_does_not_bypass_entry_conditions(self) -> None:
+        store = MemoryStore()
+        notifier = RecordingNotifier()
+        snapshot = {
+            "complete": True,
+            "comparisons": [
+                {
+                    "canonical_symbol": "PEPE",
+                    "total_oi_usd": 100,
+                    "oi_to_market_cap": 2.01,
+                    "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
+                }
+            ],
+        }
+
+        result = dispatch_trade_signals(
+            snapshot,
+            lambda _: _rsi_above_60_candles(),
+            store,
+            notifier,
+        )
+
         self.assertEqual(result.events, ())
         self.assertEqual(notifier.signals, [])
-        self.assertEqual(loaded_symbols, [])
-        self.assertEqual(store.get_trade_signal_state("PEPE"), None)
         self.assertEqual(result.scans[0].status, STOP_LONG)
-        self.assertEqual(
-            result.scans[0].reasons,
-            ("oi_to_market_cap_in_ambush_zone",),
-        )
+        self.assertIn("ema200_not_crossed_up", result.scans[0].reasons)
 
     def test_allows_entry_at_exact_two_times_market_cap(self) -> None:
         store = MemoryStore()
@@ -1646,7 +1699,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.events, ("long",))
         self.assertEqual(store.get_trade_signal_state("PEPE").status, "long")
 
-    def test_mandatory_exit_takes_priority_over_ambush_zone_stop(self) -> None:
+    def test_mandatory_exit_still_applies_above_two_times_market_cap(self) -> None:
         store = MemoryStore()
         store.states["PEPE"] = TradeSignalState(
             status="long",
@@ -1920,7 +1973,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.scans[0].status, "can_long")
         self.assertEqual(result.scans[0].canonical_symbol, "PEPE")
 
-    def test_scans_ambush_zone_without_loading_klines(self) -> None:
+    def test_scans_above_two_times_market_cap_with_klines(self) -> None:
         loaded_symbols = []
         snapshot = {
             "complete": True,
@@ -1938,15 +1991,12 @@ class TradeDispatchTests(unittest.TestCase):
             lambda symbol: loaded_symbols.append(symbol) or _long_setup_candles(),
         )
 
-        self.assertEqual(loaded_symbols, [])
+        self.assertEqual(loaded_symbols, ["PEPEUSDT"])
         self.assertEqual(result.failures, ())
-        self.assertEqual(result.scans[0].status, STOP_LONG)
-        self.assertEqual(
-            result.scans[0].reasons,
-            ("oi_to_market_cap_in_ambush_zone",),
-        )
+        self.assertEqual(result.scans[0].status, CAN_LONG)
+        self.assertEqual(result.scans[0].reasons, ())
 
-    def test_scans_active_ambush_position_for_trailing_exit(self) -> None:
+    def test_scans_active_high_ratio_position_for_trailing_exit(self) -> None:
         loaded_symbols = []
         state = TradeSignalState(
             status="long",
@@ -2057,7 +2107,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(result.scans[0].status, STOP_LONG)
         self.assertEqual(result.scans[0].reasons, ("reentry_cooldown_active",))
 
-    def test_scan_persists_no_add_when_active_long_enters_ambush_zone(self) -> None:
+    def test_scan_keeps_active_long_above_two_times_market_cap(self) -> None:
         candles = _long_setup_candles()
         state = TradeSignalState(
             status="long",
@@ -2083,9 +2133,9 @@ class TradeDispatchTests(unittest.TestCase):
 
         result = scan_trade_conditions(snapshot, lambda _: candles, {"PEPE": state})
 
-        self.assertEqual(result.scans[0].status, STOP_LONG)
-        self.assertEqual(result.state_updates[0][0], "PEPE")
-        self.assertEqual(result.state_updates[0][1].status, NO_ADD)
+        self.assertEqual(result.scans[0].status, CAN_LONG)
+        self.assertEqual(result.scans[0].reasons, ())
+        self.assertEqual(result.state_updates, ())
 
     def test_scan_never_requires_exit_without_an_active_position(self) -> None:
         snapshot = {
@@ -2180,7 +2230,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(loaded_symbols, ["PEPEUSDT"])
         self.assertEqual(recovered.scans[0].status, EXIT_LONG)
 
-    def test_scan_stops_active_long_for_oi_threshold_when_kline_load_fails(
+    def test_scan_preserves_active_long_above_two_times_market_cap_when_kline_load_fails(
         self,
     ) -> None:
         state = TradeSignalState(
@@ -2211,15 +2261,8 @@ class TradeDispatchTests(unittest.TestCase):
         )
 
         self.assertEqual(result.failures[0].canonical_symbol, "PEPE")
-        self.assertEqual(result.scans[0].status, STOP_LONG)
-        self.assertEqual(
-            result.scans[0].reasons,
-            ("oi_to_market_cap_in_ambush_zone",),
-        )
-        self.assertEqual(
-            result.state_updates,
-            (("PEPE", replace(state, status=NO_ADD)),),
-        )
+        self.assertEqual(result.scans[0].status, "kline_error")
+        self.assertEqual(result.state_updates, ())
 
     def test_scan_stops_active_long_when_comparison_and_klines_are_unavailable(
         self,
@@ -2299,7 +2342,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(loaded_symbols, ["PEPEUSDT"])
         self.assertEqual(recovered.scans[0].status, EXIT_LONG)
 
-    def test_scan_stops_active_long_when_oi_is_blocked_during_a_replay_gap(
+    def test_scan_preserves_active_long_above_two_times_market_cap_during_a_replay_gap(
         self,
     ) -> None:
         candles = _long_setup_candles()
@@ -2337,15 +2380,8 @@ class TradeDispatchTests(unittest.TestCase):
         )
 
         self.assertIn("trailing replay gap", result.failures[0].message)
-        self.assertEqual(result.scans[0].status, STOP_LONG)
-        self.assertEqual(
-            result.scans[0].reasons,
-            ("oi_to_market_cap_in_ambush_zone",),
-        )
-        self.assertEqual(
-            result.state_updates,
-            (("PEPE", replace(state, status=NO_ADD)),),
-        )
+        self.assertEqual(result.scans[0].status, "kline_error")
+        self.assertEqual(result.state_updates, ())
 
     def test_scans_missing_active_position_during_incomplete_snapshot(self) -> None:
         loaded_symbols = []
@@ -2417,7 +2453,7 @@ class TradeDispatchTests(unittest.TestCase):
                 },
                 {
                     "canonical_symbol": "PEPE",
-                    "oi_to_market_cap": 1.6,
+                    "oi_to_market_cap": 2.5,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -2435,6 +2471,10 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(
             {scan.canonical_symbol: scan.status for scan in result.scans},
             {"BAD": "kline_error", "PEPE": CAN_LONG},
+        )
+        self.assertEqual(
+            {scan.canonical_symbol: scan.oi_to_market_cap for scan in result.scans},
+            {"BAD": 1.6, "PEPE": 2.5},
         )
 
     def test_records_scan_kline_failure_without_a_notifier_or_signal_state(self) -> None:
@@ -2566,7 +2606,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(notifier.stop_longs, [])
         self.assertEqual(store.states["PEPE"].status, "no_add")
 
-    def test_stops_active_long_for_oi_threshold_without_a_binance_contract(
+    def test_preserves_active_long_above_two_times_market_cap_without_a_binance_contract(
         self,
     ) -> None:
         store = MemoryStore()
@@ -2598,14 +2638,10 @@ class TradeDispatchTests(unittest.TestCase):
             RecordingNotifier(),
         )
 
-        self.assertEqual(result.events, (STOP_LONG,))
+        self.assertEqual(result.events, ())
         self.assertEqual(result.failures[0].canonical_symbol, "PEPE")
-        self.assertEqual(result.scans[0].status, STOP_LONG)
-        self.assertEqual(
-            result.scans[0].reasons,
-            ("oi_to_market_cap_in_ambush_zone",),
-        )
-        self.assertEqual(store.states["PEPE"], replace(state, status=NO_ADD))
+        self.assertEqual(result.scans[0].status, "kline_error")
+        self.assertEqual(store.states["PEPE"], state)
 
     def test_stops_active_long_when_comparison_and_klines_are_unavailable(
         self,

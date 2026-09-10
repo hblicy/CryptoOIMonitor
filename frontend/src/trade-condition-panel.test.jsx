@@ -5,13 +5,13 @@ import { describe, expect, it } from "vitest";
 import { TradeConditionPanel } from "./App";
 
 describe("TradeConditionPanel", () => {
-  it("describes the same-bar breakout, ambush cap, and 2x volume rules", () => {
+  it("describes the same-bar breakout and 2x volume rules without an OI cap", () => {
     const html = renderToStaticMarkup(
       <TradeConditionPanel complete={true} scans={[]} />,
     );
 
     expect(html).toContain("扫描 OI / 市值 &gt; 90% 的标的");
-    expect(html).toContain("开多仅限不超过 200%");
+    expect(html).not.toContain("开多仅限不超过 200%");
     expect(html).toContain("当根上穿 EMA200");
     expect(html).toContain("前20根均量的2倍");
     expect(html).toContain("RSI 回升");
@@ -44,7 +44,7 @@ describe("TradeConditionPanel", () => {
     expect(html).toContain("trade-signal-exit_long");
   });
 
-  it("shows unavailable ambush-zone indicators as dashes instead of zeroes", () => {
+  it("shows unavailable legacy-scan indicators as dashes instead of zeroes", () => {
     const html = renderToStaticMarkup(
       <TradeConditionPanel
         complete={true}

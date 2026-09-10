@@ -8,10 +8,7 @@ import json
 import logging
 from typing import Any, Callable, Protocol
 
-from .domain import (
-    AMBUSH_OI_TO_MARKET_CAP_RATIO,
-    TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO,
-)
+from .domain import TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO
 from .trading import (
     LONG,
     Candle,
@@ -428,9 +425,7 @@ def dispatch_trade_signals(
         if complete and (
             (
                 ratio is not None
-                and TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO
-                < ratio
-                <= AMBUSH_OI_TO_MARKET_CAP_RATIO
+                and TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO < ratio
             )
             or state is not None
         ):
@@ -475,14 +470,8 @@ def dispatch_trade_signals(
 
     candidate_comparisons = [
         comparison
-        for comparison, state in candidates
+        for comparison, _state in candidates
         if comparison["canonical_symbol"] not in state_failures_by_symbol
-        and (
-            comparison.get("oi_to_market_cap") is None
-            or comparison["oi_to_market_cap"] <= AMBUSH_OI_TO_MARKET_CAP_RATIO
-            or state is not None
-            and state.status in {LONG, NO_ADD, REENTRY_COOLDOWN}
-        )
     ]
     candles_by_symbol, failures, failures_by_symbol = _load_trade_candles(
         candidate_comparisons, kline_loader
@@ -1243,10 +1232,6 @@ def scan_trade_conditions(
         comparison
         for comparison in comparisons
         if comparison["canonical_symbol"] not in failures_by_symbol
-        and (
-            comparison["canonical_symbol"] in active_states
-            or comparison["oi_to_market_cap"] <= AMBUSH_OI_TO_MARKET_CAP_RATIO
-        )
     ]
     candles_by_symbol, load_failures, load_failures_by_symbol = _load_trade_candles(
         kline_comparisons, kline_loader
@@ -1260,20 +1245,6 @@ def scan_trade_conditions(
         canonical_symbol = comparison["canonical_symbol"]
         state = active_states.get(canonical_symbol)
         ratio = comparison.get("oi_to_market_cap")
-        if (
-            state is None
-            and ratio is not None
-            and ratio > AMBUSH_OI_TO_MARKET_CAP_RATIO
-        ):
-            scans.append(
-                _state_condition_scan(
-                    comparison,
-                    None,
-                    STOP_LONG,
-                    _oi_ratio_trade_reasons(ratio),
-                )
-            )
-            continue
         candles = candles_by_symbol.get(canonical_symbol)
         if candles is None:
             failure = failures_by_symbol[canonical_symbol]
@@ -1431,19 +1402,6 @@ def _build_trade_condition_scans(
         canonical_symbol = comparison["canonical_symbol"]
         ratio = comparison["oi_to_market_cap"]
         if ratio <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO:
-            continue
-        if (
-            ratio > AMBUSH_OI_TO_MARKET_CAP_RATIO
-            and canonical_symbol not in active_trade_symbols
-        ):
-            scans.append(
-                _state_condition_scan(
-                    comparison,
-                    None,
-                    STOP_LONG,
-                    _oi_ratio_trade_reasons(ratio),
-                )
-            )
             continue
         candles = candles_by_symbol.get(canonical_symbol)
         if candles is None:
@@ -1782,8 +1740,6 @@ def _oi_ratio_trade_reasons(ratio: float | None) -> tuple[str, ...]:
         return ()
     if ratio <= TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO:
         return ("oi_to_market_cap_not_above_90",)
-    if ratio > AMBUSH_OI_TO_MARKET_CAP_RATIO:
-        return ("oi_to_market_cap_in_ambush_zone",)
     return ()
 
 

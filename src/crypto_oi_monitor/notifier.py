@@ -131,7 +131,7 @@ def _trade_message(
         f"参考入场：{signal.entry_price:.8f}\n"
         f"止损：{signal.stop_loss:.8f}（2 × ATR(14)）\n"
         f"{resume_warning}"
-        f"做多条件：OI / 市值 > {TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO * 100:.0f}% 且不超过 200%；"
+        f"做多条件：OI / 市值 > {TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO * 100:.0f}%；"
         "当根已收盘 15m K 线上穿 EMA200、当前仍在其上方且 EMA200 向上；"
         "价格校正后的聚合 OI 较15分钟前增加；"
         "15m USDT 成交额突破前20根均量的2倍；"
@@ -206,7 +206,7 @@ def _exit_long_message(
 def _reason_text(reason: str) -> str:
     labels = {
         "oi_to_market_cap_not_above_90": "OI / 市值未高于 90%",
-        "oi_to_market_cap_in_ambush_zone": "OI / 市值已高于 200%，禁止开多",
+        "oi_to_market_cap_in_ambush_zone": "历史规则：OI / 市值高于 200%",
         "aggregate_oi_history_unavailable": "缺少15分钟前聚合 OI",
         "aggregate_oi_not_increasing_after_price_adjustment": "价格校正后的聚合 OI 未较15分钟前增加",
         "ema200_not_crossed_up": "当根已收盘15m K线未上穿 EMA200，或当前已回到 EMA200 下方",
