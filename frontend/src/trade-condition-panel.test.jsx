@@ -5,19 +5,19 @@ import { describe, expect, it } from "vitest";
 import { TradeConditionPanel } from "./App";
 
 describe("TradeConditionPanel", () => {
-  it("describes the same-bar breakout and 2x volume rules without an OI cap", () => {
+  it("describes the three-candle breakout and 2x volume rules without an OI cap", () => {
     const html = renderToStaticMarkup(
       <TradeConditionPanel complete={true} scans={[]} />,
     );
 
     expect(html).toContain("扫描 OI / 市值 &gt; 90% 的标的");
     expect(html).not.toContain("开多仅限不超过 200%");
-    expect(html).toContain("当根上穿 EMA200");
+    expect(html).toContain("最近3根内上穿 EMA200");
     expect(html).toContain("前20根均量的2倍");
     expect(html).toContain("RSI 回升");
     expect(html).not.toContain("OI / 市值 &gt; 90% 且不超过 200%");
     expect(html).not.toContain("RSI &lt; 60");
-    expect(html).not.toContain("最近3根内上穿 EMA200");
+    expect(html).not.toContain("当根上穿 EMA200");
     expect(html).not.toContain("前20根均量的1.1倍");
   });
 

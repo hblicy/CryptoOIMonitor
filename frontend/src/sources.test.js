@@ -41,7 +41,7 @@ describe("data source groups", () => {
     expect(tradeSignalReason("oi_to_market_cap_not_above_90")).toBe("OI / 市值未高于 90%");
     expect(tradeSignalReason("aggregate_oi_history_unavailable")).toBe("缺少15分钟前聚合 OI");
     expect(tradeSignalReason("aggregate_oi_not_increasing_after_price_adjustment")).toBe("价格校正后的聚合 OI 未较15分钟前增加");
-    expect(tradeSignalReason("ema200_not_crossed_up")).toBe("当根已收盘15m K线未上穿 EMA200，或当前已回到 EMA200 下方");
+    expect(tradeSignalReason("ema200_not_crossed_up")).toBe("最近3根已收盘15m K线内未上穿 EMA200，或当前已回到 EMA200 下方");
     expect(tradeSignalReason("oi_to_market_cap_in_ambush_zone")).toBe("历史规则：OI / 市值高于 200%");
     expect(tradeSignalReason("ema200_breakout_before_cooldown_end")).toBe("EMA200 突破发生在冷却结束前");
     expect(tradeSignalReason("ema200_not_rising")).toBe("EMA200 未向上倾斜");

@@ -107,15 +107,15 @@ class TradeSetupTests(unittest.TestCase):
 
         self.assertEqual(entry_reasons(indicators), ())
 
-    def test_requires_ema200_crossover_on_the_current_closed_candle(self) -> None:
+    def test_requires_ema200_crossover_within_three_closed_candles(self) -> None:
         indicators = self._valid_indicators(ema200_breakout_candles_ago=None)
 
         self.assertEqual(entry_reasons(indicators), ("ema200_not_crossed_up",))
 
-    def test_rejects_ema200_breakout_from_the_previous_closed_candle(self) -> None:
+    def test_accepts_ema200_breakout_from_the_previous_closed_candle(self) -> None:
         indicators = self._valid_indicators(ema200_breakout_candles_ago=1)
 
-        self.assertEqual(entry_reasons(indicators), ("ema200_not_crossed_up",))
+        self.assertEqual(entry_reasons(indicators), ())
 
     def test_requires_current_close_to_remain_above_ema200(self) -> None:
         indicators = self._valid_indicators(
@@ -142,7 +142,7 @@ class TradeSetupTests(unittest.TestCase):
             ("quote_volume_not_above_average",),
         )
 
-    def test_rejects_ema200_breakout_from_two_closed_candles_ago(self) -> None:
+    def test_accepts_ema200_breakout_from_two_closed_candles_ago(self) -> None:
         closes = (
             [100] * 950
             + [100 + (index % 2) * 2 for index in range(45)]
@@ -150,9 +150,12 @@ class TradeSetupTests(unittest.TestCase):
         )
         candles = _candles(closes, [100] * (len(closes) - 1) + [201])
 
-        self.assertIsNone(evaluate_trade_setup(candles))
+        signal = evaluate_trade_setup(candles)
 
-    def test_rejects_ema200_breakout_older_than_the_current_closed_candle(self) -> None:
+        self.assertIsNotNone(signal)
+        self.assertEqual(trade_indicators(candles).ema200_breakout_candles_ago, 2)
+
+    def test_rejects_ema200_breakout_older_than_three_closed_candles(self) -> None:
         closes = (
             [100] * 950
             + [100 + (index % 2) * 2 for index in range(45)]
