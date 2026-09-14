@@ -959,7 +959,7 @@ class TradeDispatchTests(unittest.TestCase):
         self.assertEqual(store.states["PEPE"].status, "long")
         self.assertEqual(store.states["DOGE"].status, REENTRY_COOLDOWN)
 
-    def test_expired_cooldown_still_requires_a_new_ema200_cross(self) -> None:
+    def test_expired_cooldown_rejects_a_cross_before_cooldown_end(self) -> None:
         store = MemoryStore()
         notifier = RecordingNotifier()
         candles = _long_setup_candles()
@@ -1001,7 +1001,10 @@ class TradeDispatchTests(unittest.TestCase):
             store.get_trade_signal_state("PEPE").status,
             REENTRY_COOLDOWN,
         )
-        self.assertIn("ema200_not_crossed_up", expired.scans[0].reasons)
+        self.assertIn(
+            "ema200_breakout_before_cooldown_end",
+            expired.scans[0].reasons,
+        )
 
     def test_expired_cooldown_accepts_a_breakout_at_cooldown_end(self) -> None:
         store = MemoryStore()

@@ -132,7 +132,7 @@ def _trade_message(
         f"止损：{signal.stop_loss:.8f}（2 × ATR(14)）\n"
         f"{resume_warning}"
         f"做多条件：OI / 市值 > {TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO * 100:.0f}%；"
-        "当根已收盘 15m K 线上穿 EMA200、当前仍在其上方且 EMA200 向上；"
+        "最近3根已收盘 15m K 线内上穿 EMA200、当前仍在其上方且 EMA200 向上；"
         "价格校正后的聚合 OI 较15分钟前增加；"
         "15m USDT 成交额突破前20根均量的2倍；"
         "RSI(14) 回升\n"
@@ -209,7 +209,7 @@ def _reason_text(reason: str) -> str:
         "oi_to_market_cap_in_ambush_zone": "历史规则：OI / 市值高于 200%",
         "aggregate_oi_history_unavailable": "缺少15分钟前聚合 OI",
         "aggregate_oi_not_increasing_after_price_adjustment": "价格校正后的聚合 OI 未较15分钟前增加",
-        "ema200_not_crossed_up": "当根已收盘15m K线未上穿 EMA200，或当前已回到 EMA200 下方",
+        "ema200_not_crossed_up": "最近3根已收盘15m K线内未上穿 EMA200，或当前已回到 EMA200 下方",
         "ema200_breakout_before_cooldown_end": "EMA200 突破发生在冷却结束前",
         "ema200_not_rising": "EMA200 未向上倾斜",
         "quote_volume_not_increasing": "15m USDT 成交额未较上一根增加",
