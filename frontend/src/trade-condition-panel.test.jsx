@@ -4,7 +4,94 @@ import { describe, expect, it } from "vitest";
 
 import { TradeConditionPanel } from "./App";
 
+const missingDataScan = {
+  status: "stop_long",
+  canonical_symbol: "BANK",
+  candle_close_time: null,
+  rsi: 40,
+  close: 1,
+  ema200: 1.1,
+  oi_to_market_cap: null,
+  reasons: ["data_source_incomplete"],
+};
+
 describe("TradeConditionPanel", () => {
+  it("summarizes outside-universe stops without misleading empty-state text", () => {
+    const html = renderToStaticMarkup(
+      <TradeConditionPanel complete={true} comparisons={[]} unmappedAssets={[]}
+        scans={[missingDataScan, { ...missingDataScan, canonical_symbol: "BTR" }]} />,
+    );
+
+    expect(html).toContain("已隐藏 2 个已退出当前筛选范围的标的");
+    expect(html).toContain("后台仍继续执行风控检查");
+    expect(html).not.toContain("BANK");
+    expect(html).not.toContain("BTR");
+    expect(html).not.toContain("本轮没有 OI / 市值大于 90% 的标的");
+    expect(html).not.toContain("trade-condition-groups");
+  });
+
+  it("keeps current, unmapped and mixed-reason stops and counts visible cards", () => {
+    const html = renderToStaticMarkup(
+      <TradeConditionPanel complete={true}
+        comparisons={[{ canonical_symbol: "CURRENT" }]}
+        unmappedAssets={["UNMAPPED"]}
+        scans={[
+          missingDataScan,
+          { ...missingDataScan, canonical_symbol: "CURRENT" },
+          { ...missingDataScan, canonical_symbol: "UNMAPPED" },
+          { ...missingDataScan, canonical_symbol: "MIXED", reasons: ["data_source_incomplete", "close_not_above_ema200"] },
+          { ...missingDataScan, canonical_symbol: "EMA", reasons: ["close_not_above_ema200"] },
+        ]} />,
+    );
+
+    expect(html).toContain("已隐藏 1 个已退出当前筛选范围的标的");
+    expect(html).not.toContain("BANK");
+    for (const symbol of ["CURRENT", "UNMAPPED", "MIXED", "EMA"]) {
+      expect(html).toContain(`<strong>${symbol}</strong>`);
+    }
+    expect(html).toContain("<strong>停止做多</strong><span>4 个</span>");
+  });
+
+  it("preserves forced exits and K-line errors outside the universe", () => {
+    const html = renderToStaticMarkup(
+      <TradeConditionPanel complete={true} comparisons={[]} unmappedAssets={[]}
+        scans={[
+          missingDataScan,
+          { ...missingDataScan, canonical_symbol: "EXIT", status: "exit_long", reasons: ["atr_stop_loss"] },
+          { ...missingDataScan, canonical_symbol: "ERROR", status: "kline_error", error: "K线请求失败" },
+        ]} />,
+    );
+
+    expect(html).not.toContain("BANK");
+    expect(html).toContain("<strong>EXIT</strong>");
+    expect(html).toContain("<strong>ERROR</strong>");
+    expect(html).toContain("K线请求失败");
+    expect(html).toContain("<strong>停止做多</strong><span>0 个</span>");
+  });
+
+  it("does not infer universe membership from incomplete data", () => {
+    const html = renderToStaticMarkup(
+      <TradeConditionPanel complete={false} comparisons={[]} unmappedAssets={[]}
+        scans={[missingDataScan]} />,
+    );
+
+    expect(html).toContain("<strong>BANK</strong>");
+    expect(html).toContain("数据源不完整");
+    expect(html).not.toContain("已隐藏");
+  });
+
+  it("shows a symbol again when it reenters the current universe", () => {
+    const props = { complete: true, scans: [missingDataScan], unmappedAssets: [] };
+    const outside = renderToStaticMarkup(<TradeConditionPanel {...props} comparisons={[]} />);
+    const returned = renderToStaticMarkup(
+      <TradeConditionPanel {...props} comparisons={[{ canonical_symbol: "BANK" }]} />,
+    );
+
+    expect(outside).not.toContain("<strong>BANK</strong>");
+    expect(returned).toContain("<strong>BANK</strong>");
+    expect(returned).not.toContain("已隐藏");
+  });
+
   it("describes the three-candle breakout and 2x volume rules without an OI cap", () => {
     const html = renderToStaticMarkup(
       <TradeConditionPanel complete={true} scans={[]} />,
