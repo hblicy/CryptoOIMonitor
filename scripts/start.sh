@@ -51,7 +51,6 @@ nohup python3 "$ROOT/app.py" \
   --host "$HOST" \
   --port "$PORT" \
   --log-file "$LOG_FILE" \
-  --log-max-mb "${LOG_MAX_MB:-50}" \
   --log-backup-count "${LOG_BACKUP_COUNT:-5}" \
   >"$STARTUP_LOG_FILE" 2>&1 &
 pid="$!"
