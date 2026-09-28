@@ -7,3 +7,4 @@ artifacts/
 .env
 data/*.pid
 data/*.log
+data/monitor.log.????-??-??

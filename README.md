@@ -26,7 +26,7 @@ python app.py --port 8766
 打开 <http://127.0.0.1:8766>。
 
 页面服务启动后立即刷新，正常情况下按固定 120 秒时间点刷新；若单轮耗时达到或超过 120 秒，下一轮会从本轮完成后再等待完整的 120 秒，避免持续零等待刷新放大交易所和 CoinMarketCap 压力。Binance、BingX 和 Aster 需按交易对拉取 OI，首轮全量刷新通常需要约一分钟；BingX 单个请求超过 12 秒会将该数据源标记为异常并暂停提醒推送。页面会保留最近一次完整快照并显示其时间。
-`COINMARKETCAP_API_KEY` 必须存在且不能是空字符串。`REFRESH_SECONDS`、`CMC_REFRESH_SECONDS`、`SNAPSHOT_RETENTION_DAYS`、`MIN_FREE_DISK_GB`、`LOG_MAX_MB` 和 `LOG_BACKUP_COUNT` 必须是大于 0 的整数；配置为 `0` 或负数时服务会拒绝启动。`BINANCE_MIN_TURNOVER_USD` 支持纯数字以及不区分大小写的 `K`、`M`、`B` 简写（例如 `7.5M`），默认 `5M`；修改 `.env` 后需要重启服务才会生效。该配置只控制 Binance 24 小时成交额币种池，不改变开多条件中的 15m 成交额突破均量规则。OI 按 `REFRESH_SECONDS`（默认 120 秒）刷新；CoinMarketCap 市值按 `CMC_REFRESH_SECONDS`（默认 600 秒）独立刷新。网页手动刷新要求请求头携带独立的 `MANUAL_REFRESH_TOKEN`；未配置时接口保持禁用，首次点击“刷新数据”会要求输入令牌并仅保存到当前浏览器会话。手动刷新采用非阻塞锁，同一时间只允许一轮刷新，且两次成功的手动刷新至少间隔 `REFRESH_SECONDS`；未授权时返回 HTTP 403，过于频繁时返回 HTTP 429。
+`COINMARKETCAP_API_KEY` 必须存在且不能是空字符串。`REFRESH_SECONDS`、`CMC_REFRESH_SECONDS`、`SNAPSHOT_RETENTION_DAYS`、`MIN_FREE_DISK_GB` 和 `LOG_BACKUP_COUNT` 必须是大于 0 的整数；配置为 `0` 或负数时服务会拒绝启动。`BINANCE_MIN_TURNOVER_USD` 支持纯数字以及不区分大小写的 `K`、`M`、`B` 简写（例如 `7.5M`），默认 `5M`；修改 `.env` 后需要重启服务才会生效。该配置只控制 Binance 24 小时成交额币种池，不改变开多条件中的 15m 成交额突破均量规则。OI 按 `REFRESH_SECONDS`（默认 120 秒）刷新；CoinMarketCap 市值按 `CMC_REFRESH_SECONDS`（默认 600 秒）独立刷新。网页手动刷新要求请求头携带独立的 `MANUAL_REFRESH_TOKEN`；未配置时接口保持禁用，首次点击“刷新数据”会要求输入令牌并仅保存到当前浏览器会话。手动刷新采用非阻塞锁，同一时间只允许一轮刷新，且两次成功的手动刷新至少间隔 `REFRESH_SECONDS`；未授权时返回 HTTP 403，过于频繁时返回 HTTP 429。
 
 同一进程会缓存已确认的 CoinMarketCap 币种 ID，后续市值刷新只请求报价，不会重复请求映射接口；币种池在缓存有效期内变化时不会提前调用 CMC，新币先标记为未映射并在下一次定时刷新处理。未映射或符号歧义的币种每小时会重新尝试映射一次。实际请求市值时会在日志中记录。
 
@@ -49,13 +49,17 @@ cd ..
 bash scripts/start.sh
 
 # 查看日志
-tail -f data/monitor.log
+tail -F data/monitor.log
 
 # 停止
 bash scripts/stop.sh
 ```
 
-启动脚本使用应用内日志轮转，默认单个 `monitor.log` 最大 50 MB、保留 5 个备份；可在 `.env` 中通过 `LOG_MAX_MB` 和 `LOG_BACKUP_COUNT` 调整。命令行参数解析等日志系统启用前的错误单独写入 `data/startup.log`，启动失败时脚本会同时输出启动日志和应用日志。
+启动脚本使用应用内日志轮转：按北京时间（UTC+8）每天零点切分，在跨日后的第一条日志写入时执行，不依赖服务器时区。当前日志始终写入 `data/monitor.log`，归档文件按日志日期命名，例如 `data/monitor.log.2026-09-28`。文件日志和控制台日志的时间戳均为北京时间。使用 `tail -F` 可在轮转后继续跟踪新文件。
+
+默认保留 5 个历史日志文件（不含当前文件），可在 `.env` 中通过 `LOG_BACKUP_COUNT` 调整；超出数量的日期归档在轮转时自动删除。没有日志的日期不会生成空归档。同日重启继续追加日志，跨日重启会在第一条日志写入时归档旧文件。已有日志不会追溯按天拆分，首次归档可能包含升级前多天的内容；旧版 `.1`、`.2` 等数字备份不会被自动清理。按大小轮转的 `LOG_MAX_MB` 配置不再生效，旧 `.env` 中可移除该项；自定义启动命令需移除 `--log-max-mb`，随项目提供的启动脚本已同步调整。
+
+命令行参数解析等日志系统启用前的错误仍单独写入 `data/startup.log`，启动失败时脚本会同时输出启动日志和应用日志。
 
 可通过 `ENV_FILE` 环境变量指定其他配置文件：
 

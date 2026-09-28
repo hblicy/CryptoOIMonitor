@@ -4,14 +4,14 @@ import argparse
 import hmac
 import json
 import logging
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 import math
 import mimetypes
 import os
 import re
 import sys
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +53,7 @@ from crypto_oi_monitor.trade_dispatch import (
 from crypto_oi_monitor.trading import LONG, fetch_binance_closed_candles
 
 LOGGER = logging.getLogger("crypto_oi_monitor")
+BEIJING_TIMEZONE = timezone(timedelta(hours=8))
 USD_SUFFIX_MULTIPLIERS = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
 
 
@@ -86,25 +87,42 @@ def non_negative_usd_amount(value: str) -> float:
     return amount
 
 
-def configure_logging(
-    log_file: Path | None, max_megabytes: int, backup_count: int
-) -> None:
-    options: dict[str, Any] = {
-        "level": logging.INFO,
-        "format": "%(asctime)s %(levelname)s %(message)s",
-        "force": True,
-    }
+class BeijingDailyLogHandler(TimedRotatingFileHandler):
+    def computeRollover(self, currentTime: float) -> float:
+        rollover_at = super().computeRollover(currentTime)
+        # Older Python returns the same timestamp when the file was written at midnight.
+        if rollover_at <= currentTime:
+            rollover_at += self.interval
+        return rollover_at
+
+    def rotation_filename(self, default_name: str) -> str:
+        # UTC 16:00 is Beijing midnight; label the archive with the day just ended.
+        archive_date = datetime.fromtimestamp(
+            self.rolloverAt - 1, BEIJING_TIMEZONE
+        ).strftime("%Y-%m-%d")
+        return f"{self.baseFilename}.{archive_date}"
+
+
+def configure_logging(log_file: Path | None, backup_count: int) -> None:
+    handler: logging.Handler
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        options["handlers"] = [
-            RotatingFileHandler(
-                log_file,
-                maxBytes=max_megabytes * 1024**2,
-                backupCount=backup_count,
-                encoding="utf-8",
-            )
-        ]
-    logging.basicConfig(**options)
+        handler = BeijingDailyLogHandler(
+            log_file,
+            when="midnight",
+            utc=True,
+            atTime=time(16),
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
+    else:
+        handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    formatter.converter = lambda timestamp: datetime.fromtimestamp(
+        timestamp, BEIJING_TIMEZONE
+    ).timetuple()
+    handler.setFormatter(formatter)
+    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
 
 
 def _condition_scan_payload(result: TradeConditionScanResult) -> dict[str, Any]:
@@ -636,17 +654,12 @@ def main() -> None:
         default=os.environ.get("LOG_FILE"),
     )
     parser.add_argument(
-        "--log-max-mb",
-        type=positive_refresh_seconds,
-        default=os.environ.get("LOG_MAX_MB", "50"),
-    )
-    parser.add_argument(
         "--log-backup-count",
         type=positive_refresh_seconds,
         default=os.environ.get("LOG_BACKUP_COUNT", "5"),
     )
     args = parser.parse_args()
-    configure_logging(args.log_file, args.log_max_mb, args.log_backup_count)
+    configure_logging(args.log_file, args.log_backup_count)
     application = MonitorApplication(
         cmc_refresh_seconds=args.cmc_refresh_seconds,
         snapshot_retention_days=args.snapshot_retention_days,

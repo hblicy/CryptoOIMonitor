@@ -1,5 +1,6 @@
 import json
-from logging.handlers import RotatingFileHandler
+import logging
+from logging.handlers import TimedRotatingFileHandler
 import os
 from pathlib import Path
 import tempfile
@@ -632,16 +633,147 @@ class StartupConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "must not be empty"):
                 required_environment_value("COINMARKETCAP_API_KEY")
 
-    def test_configures_a_rotating_log_file(self) -> None:
+    def test_configures_a_daily_rotating_log_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, patch(
             "app.logging.basicConfig"
         ) as basic_config:
-            configure_logging(Path(temp_dir) / "monitor.log", 3, 2)
+            configure_logging(Path(temp_dir) / "monitor.log", 2)
             handler = basic_config.call_args.kwargs["handlers"][0]
-            self.assertIsInstance(handler, RotatingFileHandler)
-            self.assertEqual(handler.maxBytes, 3 * 1024**2)
+            self.assertIsInstance(handler, TimedRotatingFileHandler)
             self.assertEqual(handler.backupCount, 2)
             self.assertTrue(basic_config.call_args.kwargs["force"])
+            handler.close()
+
+
+class DailyLoggingTests(unittest.TestCase):
+    def configured_handler(self, path, backup_count=5):
+        with patch("app.logging.basicConfig") as basic_config:
+            configure_logging(path, backup_count)
+        handler = basic_config.call_args.kwargs["handlers"][0]
+        return handler
+
+    def emit_at(self, handler, timestamp, message):
+        with patch("logging.handlers.time.time", return_value=timestamp):
+            record = logging.LogRecord("test", logging.INFO, "", 0, message, (), None)
+            handler.handle(record)
+
+    def test_rotates_at_beijing_midnight_with_beijing_archive_date(self):
+        before = datetime(2026, 9, 28, 15, 59, 59, tzinfo=timezone.utc).timestamp()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "monitor.log"
+            path.write_text("已有日志\n", encoding="utf-8")
+            os.utime(path, (before, before))
+            handler = self.configured_handler(path)
+            try:
+                self.emit_at(handler, before, "跨日前")
+                self.assertFalse(path.with_name("monitor.log.2026-09-28").exists())
+                self.emit_at(handler, before + 1, "跨日后")
+                archive = path.with_name("monitor.log.2026-09-28")
+                self.assertTrue(archive.exists())
+                self.assertIn("已有日志", archive.read_text(encoding="utf-8"))
+                self.assertIn("2026-09-28 23:59:59", archive.read_text(encoding="utf-8"))
+                current = path.read_text(encoding="utf-8")
+                self.assertIn("2026-09-29 00:00:00", current)
+                self.assertIn("跨日后", current)
+                self.assertNotIn("跨日前", current)
+            finally:
+                handler.close()
+
+    def test_retains_five_daily_archives_without_removing_legacy_backups(self):
+        start = datetime(2026, 9, 20, 16, tzinfo=timezone.utc).timestamp()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "monitor.log"
+            path.touch()
+            os.utime(path, (start, start))
+            legacy = path.with_name("monitor.log.1")
+            legacy.write_text("旧备份", encoding="utf-8")
+            handler = self.configured_handler(path)
+            try:
+                for day in range(8):
+                    self.emit_at(handler, start + day * 86400, f"day-{day}")
+                self.assertEqual(
+                    sorted(p.name for p in path.parent.glob("monitor.log.2026-*")),
+                    [f"monitor.log.2026-09-{day}" for day in range(23, 28)],
+                )
+                self.assertEqual(legacy.read_text(encoding="utf-8"), "旧备份")
+                self.assertIn("day-7", path.read_text(encoding="utf-8"))
+            finally:
+                handler.close()
+
+    def test_restart_appends_same_day_and_archives_after_idle_days(self):
+        start = datetime(2026, 9, 28, 8, tzinfo=timezone.utc).timestamp()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "monitor.log"
+            path.write_text("重启前\n", encoding="utf-8")
+            os.utime(path, (start, start))
+            handler = self.configured_handler(path)
+            try:
+                self.emit_at(handler, start + 60, "同日重启后")
+                self.assertIn("重启前", path.read_text(encoding="utf-8"))
+                self.assertEqual(list(path.parent.glob("monitor.log.*")), [])
+            finally:
+                handler.close()
+            os.utime(path, (start + 60, start + 60))
+            handler = self.configured_handler(path)
+            try:
+                self.emit_at(handler, start + 3 * 86400, "隔日重启后")
+                archive = path.with_name("monitor.log.2026-09-28")
+                self.assertTrue(archive.exists())
+                self.assertIn("同日重启后", archive.read_text(encoding="utf-8"))
+                self.assertIn("隔日重启后", path.read_text(encoding="utf-8"))
+            finally:
+                handler.close()
+
+    def test_restart_after_midnight_write_preserves_previous_day_archive(self):
+        midnight = datetime(2026, 9, 28, 16, tzinfo=timezone.utc).timestamp()
+        original_compute = TimedRotatingFileHandler.computeRollover
+        for legacy_boundary in (False, True):
+            with self.subTest(legacy_boundary=legacy_boundary), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "monitor.log"
+                archive = path.with_name("monitor.log.2026-09-28")
+                archive.write_text("昨日完整日志\n", encoding="utf-8")
+                path.write_text("今日零点首条日志\n", encoding="utf-8")
+                os.utime(path, (midnight + 0.1, midnight + 0.1))
+                # Python 3.10 can return the input time at the rotation boundary.
+                with patch.object(
+                    TimedRotatingFileHandler,
+                    "computeRollover",
+                    autospec=True,
+                    side_effect=lambda handler, timestamp: (
+                        timestamp if legacy_boundary
+                        else original_compute(handler, timestamp)
+                    ),
+                ):
+                    handler = self.configured_handler(path)
+                try:
+                    with patch.object(handler, "doRollover", wraps=handler.doRollover) as rollover:
+                        self.emit_at(handler, midnight + 60, "重启后继续写入")
+                        # Older Python deletes an existing archive on a repeated rollover.
+                        rollover.assert_not_called()
+                    self.assertEqual(archive.read_text(encoding="utf-8"), "昨日完整日志\n")
+                    self.assertIn("今日零点首条日志", path.read_text(encoding="utf-8"))
+                    self.assertIn("重启后继续写入", path.read_text(encoding="utf-8"))
+                    self.emit_at(handler, midnight + 86400, "下一日首条日志")
+                    today_archive = path.with_name("monitor.log.2026-09-29")
+                    self.assertIn("今日零点首条日志", today_archive.read_text(encoding="utf-8"))
+                    self.assertIn("重启后继续写入", today_archive.read_text(encoding="utf-8"))
+                    self.assertEqual(archive.read_text(encoding="utf-8"), "昨日完整日志\n")
+                    self.assertIn("下一日首条日志", path.read_text(encoding="utf-8"))
+                finally:
+                    handler.close()
+
+    def test_console_timestamp_is_also_beijing_time(self):
+        with patch("app.logging.basicConfig") as basic_config:
+            configure_logging(None, 5)
+        handlers = basic_config.call_args.kwargs.get("handlers", [])
+        self.assertEqual(len(handlers), 1)
+        handler = handlers[0]
+        try:
+            record = logging.LogRecord("test", logging.INFO, "", 0, "控制台", (), None)
+            record.created = datetime(2026, 9, 28, 16, tzinfo=timezone.utc).timestamp()
+            record.msecs = 0
+            self.assertIn("2026-09-29 00:00:00", handler.format(record))
+        finally:
             handler.close()
 
 
