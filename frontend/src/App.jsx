@@ -207,7 +207,12 @@ function App() {
         </span>
       </section>
 
-      <TradeConditionPanel scans={tradeConditionScans} complete={summary?.complete} />
+      <TradeConditionPanel
+        scans={tradeConditionScans}
+        complete={summary?.complete}
+        comparisons={comparisons}
+        unmappedAssets={summary?.unmapped_assets ?? []}
+      />
 
       <section className="workspace">
         <div className="table-region">
@@ -323,8 +328,20 @@ function Coverage({ venues }) {
   return <span className="coverage"><span>{coverage.toFixed(1)}%</span><i><b style={{ width: `${coverage}%` }} /></i></span>;
 }
 
-export function TradeConditionPanel({ scans, complete }) {
-  const { canLong, stopLong, exitLong, errors } = groupTradeConditionScans(scans);
+export function TradeConditionPanel({ scans, complete, comparisons = [], unmappedAssets = [] }) {
+  const currentSymbols = new Set([
+    ...comparisons.map((item) => item.canonical_symbol),
+    ...unmappedAssets,
+  ]);
+  const visibleScans = scans.filter((scan) => !(
+    complete === true
+    && scan.status === "stop_long"
+    && scan.reasons?.length === 1
+    && scan.reasons[0] === "data_source_incomplete"
+    && !currentSymbols.has(scan.canonical_symbol)
+  ));
+  const hiddenCount = scans.length - visibleScans.length;
+  const { canLong, stopLong, exitLong, errors } = groupTradeConditionScans(visibleScans);
   return (
     <section className="trade-signal-panel" aria-label="交易条件扫描">
       <header className="trade-signal-heading">
@@ -332,8 +349,9 @@ export function TradeConditionPanel({ scans, complete }) {
         <span>扫描 OI / 市值 &gt; 90% 的标的；最近3根内上穿 EMA200、当前仍在其上方且 EMA200 向上；价格校正 OI 增长；成交额突破前20根均量的2倍；RSI 回升</span>
       </header>
       {!complete && <p className="trade-signal-empty">数据源不完整：已暂停新开仓，已有交易状态的 15m 风控仍在执行。</p>}
-      {!scans.length
-        ? complete
+      {hiddenCount > 0 && <p className="trade-signal-empty">已隐藏 {hiddenCount} 个已退出当前筛选范围的标的；后台仍继续执行风控检查。</p>}
+      {!visibleScans.length
+        ? complete && !hiddenCount
           ? <p className="trade-signal-empty">本轮没有 OI / 市值大于 90% 的标的。</p>
           : null
         : <div className="trade-condition-groups">
