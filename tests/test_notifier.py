@@ -143,6 +143,7 @@ class WeComNotifierTests(unittest.TestCase):
                 "oi_to_market_cap": 1.2,
                 "total_oi_usd": 120,
                 "market_cap_usd": 100,
+                "funding_rate": -0.00012345,
                 "contracts": [],
             },
             110,
@@ -161,6 +162,8 @@ class WeComNotifierTests(unittest.TestCase):
         self.assertIn("前20根均量的2倍", content)
         self.assertNotIn("不超过 200%", content)
         self.assertIn("RSI(14) 回升", content)
+        self.assertIn("Binance 最新资金费率 < 0", content)
+        self.assertIn("Binance 最新资金费率：-0.012345%", content)
         self.assertNotIn("RSI(14) 低于60", content)
         self.assertNotIn("成交额较上一根增加", content)
         self.assertIn("5根前 EMA200：228.00000000", content)
@@ -207,6 +210,7 @@ class WeComNotifierTests(unittest.TestCase):
                 "canonical_symbol": "PEPE",
                 "oi_to_market_cap": 1.2,
                 "total_oi_usd": 120,
+                "funding_rate": -0.00012345,
             },
             110,
             "resume_long",
@@ -214,6 +218,7 @@ class WeComNotifierTests(unittest.TestCase):
 
         content = client.sent[0][1]["text"]["content"]
         self.assertIn("交易信号：恢复做多", content)
+        self.assertIn("Binance 最新资金费率：-0.012345%", content)
         self.assertIn("仅适用于已经平仓后的重新开仓", content)
         self.assertIn("不作为亏损仓位补仓依据", content)
 

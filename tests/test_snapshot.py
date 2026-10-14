@@ -6,6 +6,25 @@ from crypto_oi_monitor.snapshot import SourceHealth, build_snapshot
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_exposes_binance_funding_separately_from_aggregate_open_interest(self):
+        snapshot = build_snapshot(
+            captured_at="2026-10-14T00:00:00+00:00",
+            selected_assets={"PEPE"},
+            market_cap_lookup=MarketCapLookup({"PEPE": MarketCap("2832", 1)}, ()),
+            contracts_by_venue={
+                "Binance": [ContractOpenInterest(
+                    "Binance", "1000PEPEUSDT", 2, "PEPE", funding_rate=-0.00012345,
+                )],
+                "OKX": [ContractOpenInterest(
+                    "OKX", "PEPE-USDT-SWAP", 3, "PEPE", funding_rate=0.0001,
+                )],
+            },
+            health={"Binance": SourceHealth.ok(1), "OKX": SourceHealth.ok(1)},
+        )
+        comparison = snapshot["comparisons"][0]
+        self.assertEqual(comparison["total_oi_usd"], 5)
+        self.assertEqual(comparison.get("funding_rate"), -0.00012345)
+
     def test_aggregates_all_venue_oi_and_marks_complete_snapshot(self) -> None:
         snapshot = build_snapshot(
             captured_at="2026-07-24T00:00:00+00:00",

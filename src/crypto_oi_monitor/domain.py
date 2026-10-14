@@ -18,10 +18,13 @@ class ContractOpenInterest:
     symbol: str
     oi_usd: float
     canonical_symbol: str | None = None
+    funding_rate: float | None = None
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.oi_usd) or self.oi_usd < 0:
             raise ValueError("Contract OI must be finite non-negative")
+        if self.funding_rate is not None and not math.isfinite(self.funding_rate):
+            raise ValueError(f"Contract funding rate must be finite: {self.venue} {self.symbol}")
 
 
 @dataclass(frozen=True)

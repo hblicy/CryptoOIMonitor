@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import hashlib
 import json
 import logging
+import math
 from typing import Any, Callable, Protocol
 
 from .domain import TRADE_ENTRY_OI_TO_MARKET_CAP_RATIO
@@ -83,6 +84,7 @@ class TradeSignalEvent:
     adjusted_aggregate_oi: float | None = None
     previous_adjusted_aggregate_oi: float | None = None
     cooldown_candles: int | None = None
+    funding_rate: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -109,6 +111,7 @@ class TradeSignalEvent:
             "adjusted_aggregate_oi": self.adjusted_aggregate_oi,
             "previous_adjusted_aggregate_oi": self.previous_adjusted_aggregate_oi,
             "cooldown_candles": self.cooldown_candles,
+            "funding_rate": self.funding_rate,
         }
 
 
@@ -134,6 +137,7 @@ class TradeConditionScan:
     average_quote_volume: float | None = None
     adjusted_aggregate_oi: float | None = None
     previous_adjusted_aggregate_oi: float | None = None
+    funding_rate: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -157,6 +161,7 @@ class TradeConditionScan:
             "average_quote_volume": self.average_quote_volume,
             "adjusted_aggregate_oi": self.adjusted_aggregate_oi,
             "previous_adjusted_aggregate_oi": self.previous_adjusted_aggregate_oi,
+            "funding_rate": self.funding_rate,
         }
 
 
@@ -574,6 +579,7 @@ def dispatch_trade_signals(
                         None,
                         ratio,
                         aggregate_oi_usd=comparison.get("total_oi_usd"),
+                        funding_rate=_comparison_funding_rate(comparison),
                         error=failures_by_symbol[canonical_symbol].message,
                     )
                 )
@@ -675,6 +681,7 @@ def dispatch_trade_signals(
                             None,
                             ratio,
                             aggregate_oi_usd=comparison.get("total_oi_usd"),
+                            funding_rate=_comparison_funding_rate(comparison),
                             error=failure.message,
                         )
                     )
@@ -890,9 +897,12 @@ def dispatch_trade_signals(
                 continue
             if state.status == LONG:
                 if complete:
+                    funding_reasons = _funding_rate_entry_reasons(comparison)
                     set_scan(
                         _state_condition_scan(
-                            comparison, indicators, CAN_LONG, ()
+                            comparison, indicators,
+                            STOP_LONG if funding_reasons else CAN_LONG,
+                            funding_reasons,
                         )
                     )
                 else:
@@ -929,6 +939,7 @@ def dispatch_trade_signals(
                 comparison, reference_oi, indicators
             )
             entry_blockers += entry_reasons(indicators)
+            entry_blockers += _funding_rate_entry_reasons(comparison)
             if (
                 cooldown_entry_floor is not None
                 and indicators.ema200_breakout_candles_ago is not None
@@ -953,6 +964,13 @@ def dispatch_trade_signals(
         if ratio is None or _oi_ratio_trade_reasons(ratio):
             continue
         if _aggregate_oi_entry_reasons(comparison, reference_oi, indicators):
+            continue
+        funding_reasons = _funding_rate_entry_reasons(comparison)
+        if funding_reasons:
+            LOGGER.info(
+                "Long entry blocked for %s: %s (funding_rate=%s)",
+                canonical_symbol, funding_reasons, comparison.get("funding_rate"),
+            )
             continue
         signal = evaluate_trade_setup(candles)
         if signal is None:
@@ -1016,6 +1034,7 @@ def dispatch_trade_signals(
                 entry_price=signal.entry_price,
                 stop_loss=signal.stop_loss,
                 atr=signal.atr,
+                funding_rate=_comparison_funding_rate(comparison),
                 previous_rsi=signal.previous_rsi,
                 previous_close=signal.previous_close,
                 previous_ema200=signal.previous_ema200,
@@ -1275,6 +1294,7 @@ def scan_trade_conditions(
                     oi_to_market_cap=ratio,
                     aggregate_oi_usd=comparison.get("total_oi_usd"),
                     previous_aggregate_oi_usd=reference_oi.get(canonical_symbol),
+                    funding_rate=_comparison_funding_rate(comparison),
                     error=failure.message,
                 )
             )
@@ -1325,6 +1345,7 @@ def scan_trade_conditions(
                     oi_to_market_cap=ratio,
                     aggregate_oi_usd=comparison.get("total_oi_usd"),
                     previous_aggregate_oi_usd=reference_oi.get(canonical_symbol),
+                    funding_rate=_comparison_funding_rate(comparison),
                     error=failure.message,
                 )
             )
@@ -1417,6 +1438,7 @@ def _build_trade_condition_scans(
                     oi_to_market_cap=comparison["oi_to_market_cap"],
                     aggregate_oi_usd=comparison["total_oi_usd"],
                     previous_aggregate_oi_usd=reference_oi.get(canonical_symbol),
+                    funding_rate=_comparison_funding_rate(comparison),
                     error=failure.message,
                 )
             )
@@ -1519,6 +1541,7 @@ def _scan_active_trade_condition(
             comparison, reference_oi, indicators
         )
         reasons += entry_reasons(indicators)
+        reasons += _funding_rate_entry_reasons(comparison)
         if (
             cooldown_until is not None
             and indicators.ema200_breakout_candles_ago is not None
@@ -1620,6 +1643,8 @@ def _scan_active_trade_condition(
         if replayed_state.status == LONG and reasons
         else replayed_state
     )
+    # 资金费率只限制入场资格，不改变已有持仓状态。
+    reasons += _funding_rate_entry_reasons(comparison)
     return (
         _state_condition_scan(
             comparison,
@@ -1642,6 +1667,7 @@ def _scan_trade_condition(
         _oi_ratio_trade_reasons(comparison.get("oi_to_market_cap"))
         + _aggregate_oi_entry_reasons(comparison, reference_oi, indicators)
         + entry_reasons(indicators)
+        + _funding_rate_entry_reasons(comparison)
     )
     return TradeConditionScan(
         status=(
@@ -1655,6 +1681,7 @@ def _scan_trade_condition(
         oi_to_market_cap=comparison["oi_to_market_cap"],
         reasons=tuple(reasons),
         previous_rsi=indicators.previous_rsi,
+        funding_rate=_comparison_funding_rate(comparison),
         previous_close=indicators.previous_close,
         previous_ema200=indicators.previous_ema200,
         quote_volume=indicators.quote_volume,
@@ -1696,6 +1723,7 @@ def _state_condition_scan(
             oi_to_market_cap=ratio,
             reasons=tuple(reasons),
             aggregate_oi_usd=aggregate_oi_usd,
+            funding_rate=_comparison_funding_rate(comparison),
         )
     return TradeConditionScan(
         status=status,
@@ -1712,6 +1740,7 @@ def _state_condition_scan(
         quote_volume=indicators.quote_volume,
         previous_quote_volume=indicators.previous_quote_volume,
         aggregate_oi_usd=aggregate_oi_usd,
+        funding_rate=_comparison_funding_rate(comparison),
         ema200_slope_reference=indicators.ema200_slope_reference,
         average_quote_volume=indicators.average_quote_volume,
         adjusted_aggregate_oi=(
@@ -1720,6 +1749,20 @@ def _state_condition_scan(
             else float(aggregate_oi_usd) / indicators.close
         ),
     )
+
+
+def _comparison_funding_rate(comparison: dict[str, Any]) -> float | None:
+    rate = comparison.get("funding_rate")
+    return rate if rate is not None and math.isfinite(rate) else None
+
+
+def _funding_rate_entry_reasons(comparison: dict[str, Any]) -> tuple[str, ...]:
+    rate = _comparison_funding_rate(comparison)
+    if rate is None:
+        return ("funding_rate_unavailable",)
+    if rate >= 0:
+        return ("funding_rate_not_negative",)
+    return ()
 
 
 def _reference_oi_by_symbol(

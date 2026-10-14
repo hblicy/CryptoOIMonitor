@@ -66,6 +66,11 @@ def build_snapshot(
                 "oi_to_market_cap": comparison.oi_to_market_cap,
                 "status": comparison.status,
                 "covered_venues": list(comparison.covered_venues),
+                "funding_rate": next(
+                    (contract.funding_rate for contract in comparison.contracts
+                     if contract.venue == "Binance"),
+                    None,
+                ),
                 "contracts": [
                     {
                         "venue": contract.venue,
