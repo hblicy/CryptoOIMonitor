@@ -3,6 +3,10 @@ import unittest
 from crypto_oi_monitor.sources import (
     BINANCE_EXCHANGE_INFO_URL,
     BINANCE_TICKERS_URL,
+    BINANCE_MARK_PRICE_URL,
+    BINANCE_OPEN_INTEREST_URL,
+    BinanceInstrument,
+    fetch_binance_open_interest,
     HYPERLIQUID_INFO_URL,
     KUCOIN_CONTRACTS_URL,
     MEXC_CONTRACTS_URL,
@@ -91,7 +95,52 @@ class KucoinMexcClient:
         raise AssertionError(f"Unexpected GET: {url}")
 
 
+class BinanceFundingClient:
+    def __init__(self, funding_rate):
+        self.get_calls = []
+        self.mark_price = {"symbol": "1000PEPEUSDT", "markPrice": "0.01"}
+        if funding_rate is not None:
+            self.mark_price["lastFundingRate"] = funding_rate
+
+    def get_json(self, url, params=None):
+        self.get_calls.append((url, params))
+        if url == BINANCE_MARK_PRICE_URL:
+            return [self.mark_price]
+        if url == BINANCE_OPEN_INTEREST_URL and params == {"symbol": "1000PEPEUSDT"}:
+            return {"openInterest": "200"}
+        raise AssertionError(f"Unexpected GET: {url}")
+
+
 class FetcherTests(unittest.TestCase):
+    def test_preserves_latest_binance_funding_from_the_existing_mark_price_request(self):
+        client = BinanceFundingClient("-0.00012345")
+        result = fetch_binance_open_interest(
+            client, {"PEPE": BinanceInstrument("PEPE", "1000PEPEUSDT")},
+        )
+        self.assertEqual(result[0].oi_usd, 2)
+        self.assertEqual(getattr(result[0], "funding_rate", None), -0.00012345)
+        self.assertEqual(client.get_calls, [
+            (BINANCE_MARK_PRICE_URL, None),
+            (BINANCE_OPEN_INTEREST_URL, {"symbol": "1000PEPEUSDT"}),
+        ])
+
+    def test_missing_binance_funding_keeps_open_interest_available(self):
+        result = fetch_binance_open_interest(
+            BinanceFundingClient(None),
+            {"PEPE": BinanceInstrument("PEPE", "1000PEPEUSDT")},
+        )
+        self.assertEqual(result[0].oi_usd, 2)
+        self.assertIsNone(getattr(result[0], "funding_rate", None))
+
+    def test_rejects_invalid_binance_funding_instead_of_silently_accepting_it(self):
+        for rate in ("NaN", "Infinity", "-Infinity", "invalid"):
+            with self.subTest(rate=rate):
+                with self.assertRaises(ValueError):
+                    fetch_binance_open_interest(
+                        BinanceFundingClient(rate),
+                        {"PEPE": BinanceInstrument("PEPE", "1000PEPEUSDT")},
+                    )
+
     def test_fetches_binance_universe_from_the_two_public_market_endpoints(self) -> None:
         client = FakeHttpClient()
 

@@ -342,6 +342,258 @@ def _condition_scan(symbol: str, status: str) -> TradeConditionScan:
     )
 
 
+class FundingRateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.candles = _long_setup_candles()
+
+    def snapshot(self, funding_rate):
+        comparison = {
+            "canonical_symbol": "PEPE",
+            "total_oi_usd": 100,
+            "oi_to_market_cap": 1.2,
+            "contracts": [{"venue": "Binance", "symbol": "1000PEPEUSDT"}],
+        }
+        if funding_rate is not None:
+            comparison["funding_rate"] = funding_rate
+        return {"complete": True, "comparisons": [comparison]}
+
+    def state(self, status):
+        return TradeSignalState(
+            status=status,
+            entry_price=100,
+            stop_loss=90,
+            entry_atr=2,
+            highest_close=100.5,
+            last_processed_candle_close_time=self.candles[-1].close_time,
+            binance_symbol="1000PEPEUSDT",
+        )
+
+    def test_blocks_new_longs_and_both_scan_paths_when_funding_is_not_negative(self):
+        for rate in (0.0, -0.0, 0.0001):
+            with self.subTest(rate=rate):
+                snapshot = self.snapshot(rate)
+                store = MemoryStore()
+                notifier = RecordingNotifier()
+                result = _dispatch_trade_signals(
+                    snapshot, _reference_snapshot(snapshot),
+                    lambda _: self.candles, store, notifier,
+                )
+                scan_result = _scan_trade_conditions(
+                    snapshot, _reference_snapshot(snapshot), lambda _: self.candles,
+                )
+                self.assertEqual(result.events, ())
+                self.assertEqual(notifier.signals, [])
+                self.assertIsNone(store.get_trade_signal_state("PEPE"))
+                for scan in (result.scans[0], scan_result.scans[0]):
+                    self.assertEqual(scan.status, STOP_LONG)
+                    self.assertEqual(scan.reasons, ("funding_rate_not_negative",))
+                    self.assertEqual(scan.as_dict().get("funding_rate"), rate)
+
+    def test_blocks_missing_and_non_finite_funding_rates(self):
+        for rate in (None, float("nan"), float("inf"), float("-inf")):
+            with self.subTest(rate=rate):
+                snapshot = self.snapshot(rate)
+                result = _dispatch_trade_signals(
+                    snapshot, _reference_snapshot(snapshot),
+                    lambda _: self.candles, MemoryStore(), RecordingNotifier(),
+                )
+                scan_result = _scan_trade_conditions(
+                    snapshot, _reference_snapshot(snapshot), lambda _: self.candles,
+                )
+                self.assertEqual(result.events, ())
+                for scan in (result.scans[0], scan_result.scans[0]):
+                    self.assertEqual(scan.status, STOP_LONG)
+                    self.assertEqual(scan.reasons, ("funding_rate_unavailable",))
+                    self.assertIsNone(scan.as_dict().get("funding_rate"))
+
+    def test_accepts_negative_funding_without_rounding_it_before_comparison(self):
+        for rate in (-0.0001, -0.000000001):
+            with self.subTest(rate=rate):
+                snapshot = self.snapshot(rate)
+                loaded_symbols = []
+                def load(symbol):
+                    loaded_symbols.append(symbol)
+                    return self.candles
+                result = _dispatch_trade_signals(
+                    snapshot, _reference_snapshot(snapshot),
+                    load, MemoryStore(), RecordingNotifier(),
+                )
+                self.assertEqual(loaded_symbols, ["1000PEPEUSDT"])
+                self.assertEqual(result.events, ("long",))
+                self.assertEqual(result.scans[0].status, CAN_LONG)
+                self.assertEqual(result.scans[0].as_dict().get("funding_rate"), rate)
+                self.assertEqual(result.details[0].as_dict().get("funding_rate"), rate)
+
+    def test_kline_request_failures_preserve_funding_for_new_and_active_scans(self):
+        def fail_klines(symbol):
+            raise DataSourceRequestError("Binance K-line request failed")
+
+        for rate in (-0.00012345, 0.0, 0.0001, None):
+            for active in (False, True):
+                with self.subTest(rate=rate, active=active):
+                    snapshot = self.snapshot(rate)
+                    store = MemoryStore()
+                    states = {"PEPE": self.state("long")} if active else {}
+                    store.states.update(states)
+                    notifier = RecordingNotifier()
+                    result = _dispatch_trade_signals(
+                        snapshot, _reference_snapshot(snapshot),
+                        fail_klines, store, notifier,
+                    )
+                    scan_result = _scan_trade_conditions(
+                        snapshot, _reference_snapshot(snapshot), fail_klines, states,
+                    )
+                    for scan in (result.scans[0], scan_result.scans[0]):
+                        self.assertEqual(scan.status, "kline_error")
+                        self.assertIn("K-line request failed", scan.error)
+                        self.assertEqual(scan.as_dict()["funding_rate"], rate)
+                    self.assertEqual(result.events, ())
+                    self.assertEqual(notifier.signals, [])
+                    self.assertEqual(store.states, states)
+
+    def test_replay_failures_preserve_funding_in_both_scan_paths(self):
+        snapshot = self.snapshot(-0.00012345)
+        candles = _post_entry_candles()
+        del candles[-2]
+        state = replace(
+            self.state("long"),
+            last_processed_candle_close_time=self.candles[-2].close_time,
+        )
+        store = MemoryStore()
+        store.states["PEPE"] = state
+        result = _dispatch_trade_signals(
+            snapshot, _reference_snapshot(snapshot),
+            lambda _: candles, store, RecordingNotifier(),
+        )
+        scan_result = _scan_trade_conditions(
+            snapshot, _reference_snapshot(snapshot),
+            lambda _: candles, {"PEPE": state},
+        )
+        for scan in (result.scans[0], scan_result.scans[0]):
+            self.assertEqual(scan.status, "kline_error")
+            self.assertIn("does not cover", scan.error)
+            self.assertEqual(scan.as_dict()["funding_rate"], -0.00012345)
+        self.assertEqual(result.events, ())
+        self.assertEqual(store.states["PEPE"], state)
+        self.assertEqual(scan_result.state_updates, ())
+
+    def test_requires_negative_funding_for_resume_and_expired_cooldown(self):
+        for status in (NO_ADD, REENTRY_COOLDOWN):
+            for rate in (0.0, 0.0001, None, -0.0001):
+                with self.subTest(status=status, rate=rate):
+                    snapshot = self.snapshot(rate)
+                    state = (
+                        self.state(NO_ADD) if status == NO_ADD else TradeSignalState(
+                            status=REENTRY_COOLDOWN,
+                            cooldown_until_candle_close_time=self.candles[-2].close_time,
+                            binance_symbol="1000PEPEUSDT",
+                        )
+                    )
+                    store = MemoryStore()
+                    store.states["PEPE"] = state
+                    result = _dispatch_trade_signals(
+                        snapshot, _reference_snapshot(snapshot),
+                        lambda _: self.candles, store, RecordingNotifier(),
+                    )
+                    scan_result = _scan_trade_conditions(
+                        snapshot, _reference_snapshot(snapshot),
+                        lambda _: self.candles, {"PEPE": state},
+                    )
+                    allowed = rate is not None and rate < 0
+                    self.assertEqual(result.events, (RESUME_LONG,) if allowed else ())
+                    for scan in (result.scans[0], scan_result.scans[0]):
+                        self.assertEqual(scan.status, CAN_LONG if allowed else STOP_LONG)
+                        if not allowed:
+                            self.assertIn(
+                                "funding_rate_unavailable" if rate is None
+                                else "funding_rate_not_negative", scan.reasons,
+                            )
+
+    def test_funding_change_does_not_change_existing_position_state(self):
+        for rate in (0.0001, None, -0.0001):
+            with self.subTest(rate=rate):
+                snapshot = self.snapshot(rate)
+                state = self.state("long")
+                store = MemoryStore()
+                store.states["PEPE"] = state
+                result = _dispatch_trade_signals(
+                    snapshot, _reference_snapshot(snapshot),
+                    lambda _: self.candles, store, RecordingNotifier(),
+                )
+                scan_result = _scan_trade_conditions(
+                    snapshot, _reference_snapshot(snapshot),
+                    lambda _: self.candles, {"PEPE": state},
+                )
+                self.assertEqual(result.events, ())
+                self.assertEqual(store.states["PEPE"], state)
+                self.assertEqual(scan_result.state_updates, ())
+                expected_status = CAN_LONG if rate is not None and rate < 0 else STOP_LONG
+                self.assertEqual(result.scans[0].status, expected_status)
+                self.assertEqual(scan_result.scans[0].status, expected_status)
+
+    def test_funding_does_not_block_exit_checks(self):
+        candles = _atr_exit_candles()
+        for rate in (0.0001, None):
+            with self.subTest(rate=rate):
+                snapshot = self.snapshot(rate)
+                state = replace(
+                    self.state("long"), stop_loss=98,
+                    last_processed_candle_close_time=candles[-2].close_time,
+                )
+                store = MemoryStore()
+                store.states["PEPE"] = state
+                notifier = RecordingNotifier()
+                result = _dispatch_trade_signals(
+                    snapshot, _reference_snapshot(snapshot),
+                    lambda _: candles, store, notifier,
+                )
+                scan_result = _scan_trade_conditions(
+                    snapshot, _reference_snapshot(snapshot), lambda _: candles,
+                    {"PEPE": state},
+                )
+                self.assertEqual(result.events, (EXIT_LONG,))
+                self.assertEqual(len(notifier.exit_longs), 1)
+                self.assertEqual(result.scans[0].status, EXIT_LONG)
+                self.assertEqual(scan_result.scans[0].status, EXIT_LONG)
+
+    def test_rechecks_funding_on_the_same_candle_and_preserves_signal_deduplication(self):
+        store = MemoryStore()
+        notifier = RecordingNotifier()
+        results = []
+        for rate in (0.0001, -0.0001, -0.0001):
+            snapshot = self.snapshot(rate)
+            results.append(_dispatch_trade_signals(
+                snapshot, _reference_snapshot(snapshot),
+                lambda _: self.candles, store, notifier,
+            ))
+        self.assertEqual([result.events for result in results], [(), ("long",), ()])
+        self.assertEqual(len(notifier.signals), 1)
+
+    def test_condition_list_only_includes_negative_funding_candidates(self):
+        comparisons = []
+        for symbol, rate in (("PEPE", -0.0001), ("ZERO", 0.0), ("MISSING", None)):
+            comparison = self.snapshot(rate)["comparisons"][0]
+            comparison["canonical_symbol"] = symbol
+            comparison["contracts"] = [{"venue": "Binance", "symbol": f"{symbol}USDT"}]
+            comparisons.append(comparison)
+        snapshot = {"complete": True, "comparisons": comparisons}
+        result = _dispatch_trade_signals(
+            snapshot, _reference_snapshot(snapshot), lambda _: self.candles,
+            MemoryStore(), RecordingNotifier(),
+        )
+        store = ConditionListStore(SimpleNamespace(
+            can_long=(), stop_long=(), exit_long=(), last_sent_at=None,
+        ))
+        notifier = ConditionListNotifier()
+        event = dispatch_trade_condition_list(
+            result.scans, store, notifier, datetime(2026, 10, 14, tzinfo=timezone.utc),
+        )
+        self.assertEqual(result.failures, ())
+        self.assertEqual(result.events, ("long",))
+        self.assertEqual(event, "updated")
+        self.assertEqual(notifier.lists, [(("PEPE",), (), False)])
+
+
 class TradeDispatchTests(unittest.TestCase):
     def test_incomplete_snapshot_still_runs_active_position_exit_checks(self) -> None:
         store = MemoryStore()
@@ -362,6 +614,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -521,6 +774,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -570,6 +824,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 0.89,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -607,6 +862,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 2.01,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "OKX", "symbol": "PEPE-USDT-SWAP"}
                     ],
@@ -636,6 +892,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -725,6 +982,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -769,6 +1027,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -802,6 +1061,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -852,6 +1112,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": symbol,
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": f"{symbol}USDT"}
                     ],
@@ -891,6 +1152,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -939,12 +1201,14 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 },
                 {
                     "canonical_symbol": "DOGE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "DOGEUSDT"}],
                 }
             ],
@@ -977,6 +1241,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1022,6 +1287,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "OKX", "symbol": "PEPE-USDT-SWAP"}
                     ],
@@ -1058,6 +1324,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1092,6 +1359,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -1145,6 +1413,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -1202,6 +1471,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 2.01,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -1239,6 +1509,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -1499,6 +1770,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.4,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1552,6 +1824,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1590,6 +1863,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 2.01,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1614,6 +1888,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 0.9,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1635,6 +1910,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 2.01,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1663,6 +1939,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 2.01,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1690,6 +1967,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1721,6 +1999,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 2.01,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1778,6 +2057,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1802,6 +2082,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1827,6 +2108,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1856,6 +2138,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1880,6 +2163,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 0.9,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1899,6 +2183,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.1,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1921,11 +2206,13 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 },
                 {
                     "canonical_symbol": "DOGE",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "DOGEUSDT"}],
                 },
             ],
@@ -1965,6 +2252,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -1984,6 +2272,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 2.01,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -2016,6 +2305,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 2.01,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -2063,6 +2353,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -2098,6 +2389,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -2127,6 +2419,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 2.01,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -2147,6 +2440,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -2177,6 +2471,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -2204,6 +2499,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -2250,6 +2546,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 2.01,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -2316,6 +2613,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.2,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -2371,6 +2669,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 2.01,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -2429,6 +2728,7 @@ class TradeDispatchTests(unittest.TestCase):
                     "canonical_symbol": "PEPE",
                     "total_oi_usd": 100,
                     "oi_to_market_cap": 2.01,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "OKX", "symbol": "PEPE-USDT-SWAP"}],
                 }
             ],
@@ -2452,11 +2752,13 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "BAD",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "OKX", "symbol": "BAD-USDT-SWAP"}],
                 },
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 2.5,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "Binance", "symbol": "PEPEUSDT"}
                     ],
@@ -2487,6 +2789,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -2508,6 +2811,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -2528,6 +2832,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 0.9,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -2555,6 +2860,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 0.89,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -2587,6 +2893,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 0.89,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -2627,6 +2934,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 2.01,
+                    "funding_rate": -0.0001,
                     "contracts": [
                         {"venue": "OKX", "symbol": "PEPE-USDT-SWAP"}
                     ],
@@ -2683,11 +2991,13 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 0.9,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 },
                 {
                     "canonical_symbol": "DOGE",
                     "oi_to_market_cap": 1.4,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "DOGEUSDT"}],
                 },
             ],
@@ -2715,6 +3025,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -2738,6 +3049,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -2766,6 +3078,7 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 }
             ],
@@ -2793,11 +3106,13 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "NEW",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "NEWUSDT"}],
                 },
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 },
             ],
@@ -2827,11 +3142,13 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 },
                 {
                     "canonical_symbol": "DOGE",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "DOGEUSDT"}],
                 },
             ],
@@ -2855,11 +3172,13 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "NEW",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "NEWUSDT"}],
                 },
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 },
             ],
@@ -2889,11 +3208,13 @@ class TradeDispatchTests(unittest.TestCase):
                 {
                     "canonical_symbol": "BAD",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "BADUSDT"}],
                 },
                 {
                     "canonical_symbol": "PEPE",
                     "oi_to_market_cap": 1.6,
+                    "funding_rate": -0.0001,
                     "contracts": [{"venue": "Binance", "symbol": "PEPEUSDT"}],
                 },
             ],

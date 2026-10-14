@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from time import sleep
 from typing import Any, Protocol
@@ -358,17 +358,28 @@ def fetch_binance_universe(
 def fetch_binance_open_interest(
     client: PublicHttpClient, universe: dict[str, BinanceInstrument]
 ) -> list[ContractOpenInterest]:
-    mark_prices = {
-        item["symbol"]: item["markPrice"]
+    mark_data = {
+        item["symbol"]: item
         for item in client.get_json(BINANCE_MARK_PRICE_URL)
     }
-    return _fetch_base_oi_for_universe(
+    contracts = _fetch_base_oi_for_universe(
         client,
         universe,
         BINANCE_OPEN_INTEREST_URL,
-        mark_prices,
+        {symbol: item["markPrice"] for symbol, item in mark_data.items()},
         parse_binance_open_interest,
     )
+    return [
+        replace(
+            contract,
+            funding_rate=(
+                None
+                if mark_data[contract.symbol].get("lastFundingRate") is None
+                else float(mark_data[contract.symbol]["lastFundingRate"])
+            ),
+        )
+        for contract in contracts
+    ]
 
 
 def fetch_bingx_open_interest(

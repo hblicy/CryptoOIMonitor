@@ -16,6 +16,36 @@ const missingDataScan = {
 };
 
 describe("TradeConditionPanel", () => {
+  it("shows the latest funding rate and explains rejected entries", () => {
+    const html = renderToStaticMarkup(
+      <TradeConditionPanel complete={true} scans={[
+        { ...missingDataScan, canonical_symbol: "NEGATIVE", status: "can_long", reasons: [], funding_rate: -0.00012345 },
+        { ...missingDataScan, canonical_symbol: "POSITIVE", reasons: ["funding_rate_not_negative"], funding_rate: 0.0001 },
+        { ...missingDataScan, canonical_symbol: "MISSING", reasons: ["funding_rate_unavailable"] },
+      ]} />,
+    );
+    expect(html).toContain("Binance 最新资金费率 &lt; 0");
+    expect(html).toContain("<dt>资金费率</dt><dd>-0.012345%</dd>");
+    expect(html).toContain("<dt>资金费率</dt><dd>0.010000%</dd>");
+    expect(html).toContain("<dt>资金费率</dt><dd>—</dd>");
+    expect(html).toContain("Binance 最新资金费率未小于 0");
+    expect(html).toContain("Binance 最新资金费率不可用");
+  });
+
+  it("shows available funding rates and missing values on K-line error cards", () => {
+    const html = renderToStaticMarkup(
+      <TradeConditionPanel complete={true} scans={[
+        { ...missingDataScan, canonical_symbol: "NEGATIVE", status: "kline_error", error: "K线请求失败", funding_rate: -0.00012345 },
+        { ...missingDataScan, canonical_symbol: "ZERO", status: "kline_error", error: "K线请求失败", funding_rate: 0 },
+        { ...missingDataScan, canonical_symbol: "MISSING", status: "kline_error", error: "K线请求失败" },
+      ]} />,
+    );
+    expect(html).toContain("K线请求失败");
+    expect(html).toContain("Binance 最新资金费率：-0.012345%");
+    expect(html).toContain("Binance 最新资金费率：0.000000%");
+    expect(html).toContain("Binance 最新资金费率：—");
+  });
+
   it("summarizes outside-universe stops without misleading empty-state text", () => {
     const html = renderToStaticMarkup(
       <TradeConditionPanel complete={true} comparisons={[]} unmappedAssets={[]}

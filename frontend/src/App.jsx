@@ -61,6 +61,8 @@ export function tradeSignalReason(reason) {
   if (reason === "close_not_above_ema200") return "15m 收盘价未高于 EMA200";
   if (reason === "rsi_not_below_60") return "RSI(14) 未低于 60";
   if (reason === "rsi_not_rising") return "RSI(14) 未回升";
+  if (reason === "funding_rate_not_negative") return "Binance 最新资金费率未小于 0";
+  if (reason === "funding_rate_unavailable") return "Binance 最新资金费率不可用";
   if (reason === "oi_to_market_cap_not_above_90") return "OI / 市值未高于 90%";
   if (reason === "oi_to_market_cap_in_ambush_zone") return "历史规则：OI / 市值高于 200%";
   if (reason === "close_below_ema200") return "15m 收盘价低于 EMA200";
@@ -346,7 +348,7 @@ export function TradeConditionPanel({ scans, complete, comparisons = [], unmappe
     <section className="trade-signal-panel" aria-label="交易条件扫描">
       <header className="trade-signal-heading">
         <strong>交易条件扫描</strong>
-        <span>扫描 OI / 市值 &gt; 90% 的标的；最近3根内上穿 EMA200、当前仍在其上方且 EMA200 向上；价格校正 OI 增长；成交额突破前20根均量的2倍；RSI 回升</span>
+        <span>扫描 OI / 市值 &gt; 90% 的标的；最近3根内上穿 EMA200、当前仍在其上方且 EMA200 向上；价格校正 OI 增长；成交额突破前20根均量的2倍；RSI 回升；Binance 最新资金费率 &lt; 0</span>
       </header>
       {!complete && <p className="trade-signal-empty">数据源不完整：已暂停新开仓，已有交易状态的 15m 风控仍在执行。</p>}
       {hiddenCount > 0 && <p className="trade-signal-empty">已隐藏 {hiddenCount} 个已退出当前筛选范围的标的；后台仍继续执行风控检查。</p>}
@@ -389,6 +391,7 @@ function TradeConditionCard({ scan }) {
         ? <>
           <p className="trade-condition-error">{scan.error}</p>
           <p className="trade-signal-note">OI / 市值：{formatRatio(scan.oi_to_market_cap)}</p>
+          <p className="trade-signal-note">Binance 最新资金费率：{formatFundingRate(scan.funding_rate)}</p>
         </>
         : <>
           <dl>
@@ -396,10 +399,11 @@ function TradeConditionCard({ scan }) {
             <div><dt>收盘价</dt><dd>{formatTradePrice(scan.close)}</dd></div>
             <div><dt>EMA200</dt><dd>{formatTradePrice(scan.ema200)}</dd></div>
             <div><dt>OI / 市值</dt><dd>{formatRatio(scan.oi_to_market_cap)}</dd></div>
+            <div><dt>资金费率</dt><dd>{formatFundingRate(scan.funding_rate)}</dd></div>
           </dl>
           {scan.status === "can_long"
             ? <p className="trade-signal-note">
-              满足最近3根内上穿 EMA200、当前仍在其上方、EMA200 向上、RSI 回升、价格校正 OI 增长及成交额突破均量条件；
+              满足最近3根内上穿 EMA200、当前仍在其上方、EMA200 向上、RSI 回升、价格校正 OI 增长、成交额突破均量及 Binance 最新资金费率小于 0 的条件；
               聚合 OI {formatUsd(scan.previous_aggregate_oi_usd)} → {formatUsd(scan.aggregate_oi_usd)}；
               价格校正 OI 指数 {formatTradePrice(scan.previous_adjusted_aggregate_oi)} → {formatTradePrice(scan.adjusted_aggregate_oi)}；
               15m成交额 {formatUsd(scan.quote_volume)}，前20根均量 {formatUsd(scan.average_quote_volume)}；
@@ -409,6 +413,11 @@ function TradeConditionCard({ scan }) {
         </>}
     </article>
   );
+}
+
+function formatFundingRate(value) {
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  return `${(Number(value) * 100).toFixed(6)}%`;
 }
 
 function formatTradePrice(value) {
